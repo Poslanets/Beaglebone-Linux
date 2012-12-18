@@ -26,12 +26,10 @@
 #ifndef __ASM_ARCH_OMAP_GPIO_H
 #define __ASM_ARCH_OMAP_GPIO_H
 
-#ifndef __ASSEMBLER__
 #include <linux/io.h>
 #include <linux/platform_device.h>
 #include <mach/irqs.h>
 
-#endif
 #define OMAP1_MPUIO_BASE			0xfffb5000
 
 /*
@@ -171,7 +169,6 @@
 #define METHOD_GPIO_24XX	5
 #define METHOD_GPIO_44XX	6
 
-#ifndef __ASSEMBLER__
 struct omap_gpio_dev_attr {
 	int bank_width;		/* GPIO bank width */
 	bool dbck_flag;		/* dbck required or not - True for OMAP3&4 */
@@ -241,6 +238,5 @@ static inline int irq_to_gpio(unsigned irq)
 	/* we don't supply reverse mappings for non-SOC gpios */
 	return -EIO;
 }
-#endif
 
 #endif

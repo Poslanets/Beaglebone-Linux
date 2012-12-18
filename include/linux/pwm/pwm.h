@@ -116,7 +116,6 @@ enum {
 
 struct pwm_chan_attrib {
 	int max_freq;
-	bool inverse_pol;
 };
 
 #define PWM_CHANNEL NCHAN

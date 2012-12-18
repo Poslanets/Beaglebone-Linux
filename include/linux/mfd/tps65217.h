@@ -209,21 +209,38 @@ enum tps65217_regulator_id {
 #define TPS65217_NUM_LDO		4
 /* Number of total regulators available */
 #define TPS65217_NUM_REGULATOR		(TPS65217_NUM_DCDC + TPS65217_NUM_LDO)
+/* Number of subdevices (regulators + backlight) */
+#define TPS65217_NUM_SUBDEVS		(TPS65217_NUM_REGULATOR + 1)
+/* Index of the backlight subdevice */
+#define TPS65217_SUBDEV_BL		TPS65217_NUM_REGULATOR
+
+enum tps65217_bl_isel {
+	TPS65217_BL_ISET1 = 1,
+	TPS65217_BL_ISET2 = 2,
+};
+
+enum tps65217_bl_fdim {
+	TPS65217_BL_FDIM_100HZ,
+	TPS65217_BL_FDIM_200HZ,
+	TPS65217_BL_FDIM_500HZ,
+	TPS65217_BL_FDIM_1000HZ,
+};
+
+struct tps65217_bl_pdata {
+	enum tps65217_bl_isel isel;
+	enum tps65217_bl_fdim fdim;
+};
 
 /**
  * struct tps65217_board - packages regulator init data
  * @tps65217_regulator_data: regulator initialization values
- * @status_off: Set the PMIC to shutdown on PWR_EN toggle
  *
  * Board data may be used to initialize regulator.
  */
 struct tps65217_board {
 	struct regulator_init_data *tps65217_init_data;
-	bool status_off;
-};
-
-struct tps65217_rdelay {
-	int ramp_delay;
+	struct device_node *of_node[TPS65217_NUM_SUBDEVS];
+	struct tps65217_bl_pdata *bl_pdata;
 };
 
 /**
@@ -233,7 +250,6 @@ struct tps65217_rdelay {
  * @max_uV:		minimum micro volts
  * @vsel_to_uv:		Function pointer to get voltage from selector
  * @uv_to_vsel:		Function pointer to get selector from voltage
- * @delay:		Set voltage delay in us
  * @table:		Table for non-uniform voltage step-size
  * @table_len:		Length of the voltage table
  * @enable_mask:	Regulator enable mask bits
@@ -248,7 +264,6 @@ struct tps_info {
 	int max_uV;
 	int (*vsel_to_uv)(unsigned int vsel);
 	int (*uv_to_vsel)(int uV, unsigned int *vsel);
-	int delay;
 	const int *table;
 	unsigned int table_len;
 	unsigned int enable_mask;
@@ -272,6 +287,7 @@ struct tps65217 {
 
 	/* Client devices */
 	struct platform_device *regulator_pdev[TPS65217_NUM_REGULATOR];
+	struct platform_device *bl_pdev;
 };
 
 static inline struct tps65217 *dev_to_tps65217(struct device *dev)

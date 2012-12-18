@@ -26,13 +26,11 @@
 #include <linux/completion.h>
 #include <linux/pm_runtime.h>
 
-#include <mach/board-am335xevm.h>
 #include <plat/prcm.h>
 #include <plat/mailbox.h>
 #include <plat/sram.h>
 #include <plat/omap_hwmod.h>
 #include <plat/omap_device.h>
-#include <plat/emif.h>
 
 #include <asm/suspend.h>
 #include <asm/proc-fns.h>
@@ -45,50 +43,82 @@
 #include "clockdomain.h"
 #include "powerdomain.h"
 
-void (*am33xx_do_wfi_sram)(u32 *);
+void (*am33xx_do_wfi_sram)(void);
 
 #define DS_MODE		DS0_ID	/* DS0/1_ID */
 #define MODULE_DISABLE	0x0
 #define MODULE_ENABLE	0x2
 
 #ifdef CONFIG_SUSPEND
+
 void __iomem *ipc_regs;
 void __iomem *m3_eoi;
 void __iomem *m3_code;
-u32 suspend_cfg_param_list[SUSPEND_CFG_PARAMS_END];
 
 bool enable_deep_sleep = true;
 static suspend_state_t suspend_state = PM_SUSPEND_ON;
 
 static struct device *mpu_dev;
 static struct omap_mbox *m3_mbox;
-static struct powerdomain *cefuse_pwrdm, *gfx_pwrdm, *per_pwrdm;
+static struct powerdomain *cefuse_pwrdm, *gfx_pwrdm;
 static struct clockdomain *gfx_l3_clkdm, *gfx_l4ls_clkdm;
 
+static struct am33xx_padconf lp_padconf;
+static int gmii_sel;
+
+static int core_suspend_stat = -1;
 static int m3_state = M3_STATE_UNKNOWN;
 
 static int am33xx_ipc_cmd(struct a8_wkup_m3_ipc_data *);
-static int am33xx_verify_lp_state(int);
+static int am33xx_verify_lp_state(void);
 static void am33xx_m3_state_machine_reset(void);
 
 static DECLARE_COMPLETION(a8_m3_sync);
 
 static void save_padconf(void)
 {
-	struct am33xx_padconf_regs *temp = am33xx_lp_padconf;
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(am33xx_lp_padconf); i++, temp++)
-		temp->val = readl(AM33XX_CTRL_REGADDR(temp->offset));
+	lp_padconf.mii1_col	= readl(AM33XX_CTRL_REGADDR(0x0908));
+	lp_padconf.mii1_crs	= readl(AM33XX_CTRL_REGADDR(0x090c));
+	lp_padconf.mii1_rxerr	= readl(AM33XX_CTRL_REGADDR(0x0910));
+	lp_padconf.mii1_txen	= readl(AM33XX_CTRL_REGADDR(0x0914));
+	lp_padconf.mii1_rxdv	= readl(AM33XX_CTRL_REGADDR(0x0918));
+	lp_padconf.mii1_txd3	= readl(AM33XX_CTRL_REGADDR(0x091c));
+	lp_padconf.mii1_txd2	= readl(AM33XX_CTRL_REGADDR(0x0920));
+	lp_padconf.mii1_txd1	= readl(AM33XX_CTRL_REGADDR(0x0924));
+	lp_padconf.mii1_txd0	= readl(AM33XX_CTRL_REGADDR(0x0928));
+	lp_padconf.mii1_txclk	= readl(AM33XX_CTRL_REGADDR(0x092c));
+	lp_padconf.mii1_rxclk	= readl(AM33XX_CTRL_REGADDR(0x0930));
+	lp_padconf.mii1_rxd3	= readl(AM33XX_CTRL_REGADDR(0x0934));
+	lp_padconf.mii1_rxd2	= readl(AM33XX_CTRL_REGADDR(0x0938));
+	lp_padconf.mii1_rxd1	= readl(AM33XX_CTRL_REGADDR(0x093c));
+	lp_padconf.mii1_rxd0	= readl(AM33XX_CTRL_REGADDR(0x0940));
+	lp_padconf.rmii1_refclk	= readl(AM33XX_CTRL_REGADDR(0x0944));
+	lp_padconf.mdio_data	= readl(AM33XX_CTRL_REGADDR(0x0948));
+	lp_padconf.mdio_clk	= readl(AM33XX_CTRL_REGADDR(0x094c));
+	gmii_sel		= readl(AM33XX_CTRL_REGADDR(0x0650));
 }
 
 static void restore_padconf(void)
 {
-	struct am33xx_padconf_regs *temp = am33xx_lp_padconf;
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(am33xx_lp_padconf); i++, temp++)
-		writel(temp->val, AM33XX_CTRL_REGADDR(temp->offset));
+	writel(lp_padconf.mii1_col, AM33XX_CTRL_REGADDR(0x0908));
+	writel(lp_padconf.mii1_crs, AM33XX_CTRL_REGADDR(0x090c));
+	writel(lp_padconf.mii1_rxerr, AM33XX_CTRL_REGADDR(0x0910));
+	writel(lp_padconf.mii1_txen, AM33XX_CTRL_REGADDR(0x0914));
+	writel(lp_padconf.mii1_rxdv, AM33XX_CTRL_REGADDR(0x0918));
+	writel(lp_padconf.mii1_txd3, AM33XX_CTRL_REGADDR(0x091c));
+	writel(lp_padconf.mii1_txd2, AM33XX_CTRL_REGADDR(0x0920));
+	writel(lp_padconf.mii1_txd1, AM33XX_CTRL_REGADDR(0x0924));
+	writel(lp_padconf.mii1_txd0, AM33XX_CTRL_REGADDR(0x0928));
+	writel(lp_padconf.mii1_txclk, AM33XX_CTRL_REGADDR(0x092c));
+	writel(lp_padconf.mii1_rxclk, AM33XX_CTRL_REGADDR(0x0930));
+	writel(lp_padconf.mii1_rxd3, AM33XX_CTRL_REGADDR(0x0934));
+	writel(lp_padconf.mii1_rxd2, AM33XX_CTRL_REGADDR(0x0938));
+	writel(lp_padconf.mii1_rxd1, AM33XX_CTRL_REGADDR(0x093c));
+	writel(lp_padconf.mii1_rxd0, AM33XX_CTRL_REGADDR(0x0940));
+	writel(lp_padconf.rmii1_refclk, AM33XX_CTRL_REGADDR(0x0944));
+	writel(lp_padconf.mdio_data, AM33XX_CTRL_REGADDR(0x0948));
+	writel(lp_padconf.mdio_clk, AM33XX_CTRL_REGADDR(0x094c));
+	writel(gmii_sel, AM33XX_CTRL_REGADDR(0x0650));
 }
 
 static int am33xx_pm_prepare_late(void)
@@ -107,8 +137,7 @@ static void am33xx_pm_finish(void)
 
 static int am33xx_do_sram_idle(long unsigned int state)
 {
-	am33xx_do_wfi_sram(&suspend_cfg_param_list[0]);
-
+	am33xx_do_wfi_sram();
 	return 0;
 }
 
@@ -116,30 +145,19 @@ static int am33xx_pm_suspend(void)
 {
 	int state, ret = 0;
 
-	struct omap_hwmod *gpmc_oh, *usb_oh, *gpio1_oh;
+	struct omap_hwmod *cpgmac_oh, *gpmc_oh, *usb_oh;
 
+	cpgmac_oh	= omap_hwmod_lookup("cpgmac0");
 	usb_oh		= omap_hwmod_lookup("usb_otg_hs");
 	gpmc_oh		= omap_hwmod_lookup("gpmc");
-	gpio1_oh	= omap_hwmod_lookup("gpio1");	/* WKUP domain GPIO */
 
+	omap_hwmod_enable(cpgmac_oh);
 	omap_hwmod_enable(usb_oh);
 	omap_hwmod_enable(gpmc_oh);
 
+	omap_hwmod_idle(cpgmac_oh);
 	omap_hwmod_idle(usb_oh);
 	omap_hwmod_idle(gpmc_oh);
-
-	/*
-	 * Disable the GPIO module. This ensure that
-	 * only sWAKEUP interrupts to Cortex-M3 get generated
-	 *
-	 * XXX: EVM_SK uses a GPIO0 pin for VTP control
-	 * in suspend and hence we can't do this for EVM_SK
-	 * alone. The side-effect of this is that GPIO wakeup
-	 * might have issues. Refer to commit 672639b for the
-	 * details
-	 */
-	if (suspend_cfg_param_list[EVM_ID] != EVM_SK)
-		omap_hwmod_idle(gpio1_oh);
 
 	if (gfx_l3_clkdm && gfx_l4ls_clkdm) {
 		clkdm_sleep(gfx_l3_clkdm);
@@ -151,8 +169,6 @@ static int am33xx_pm_suspend(void)
 		pwrdm_set_next_pwrst(gfx_pwrdm, PWRDM_POWER_OFF);
 	else
 		pr_err("Could not program GFX to low power state\n");
-
-	omap3_intc_suspend();
 
 	writel(0x0, AM33XX_CM_MPU_MPU_CLKCTRL);
 
@@ -174,14 +190,7 @@ static int am33xx_pm_suspend(void)
 		clkdm_wakeup(gfx_l4ls_clkdm);
 	}
 
-	ret = am33xx_verify_lp_state(ret);
-
-	/*
-	 * Enable the GPIO module. Once the driver is
-	 * fully adapted to runtime PM this will go away
-	 */
-	if (suspend_cfg_param_list[EVM_ID] != EVM_SK)
-		omap_hwmod_enable(gpio1_oh);
+	core_suspend_stat = ret;
 
 	return ret;
 }
@@ -272,7 +281,11 @@ static void am33xx_m3_state_machine_reset(void)
 
 static void am33xx_pm_end(void)
 {
+	int ret;
+
 	suspend_state = PM_SUSPEND_ON;
+
+	ret = am33xx_verify_lp_state();
 
 	omap_mbox_enable_irq(m3_mbox, IRQ_RX);
 
@@ -303,7 +316,7 @@ int am33xx_ipc_cmd(struct a8_wkup_m3_ipc_data *data)
 }
 
 /* return 0 if no reset M3 needed, 1 otherwise */
-static int am33xx_verify_lp_state(int core_suspend_stat)
+static int am33xx_verify_lp_state(void)
 {
 	int status, ret = 0;
 
@@ -318,8 +331,6 @@ static int am33xx_verify_lp_state(int core_suspend_stat)
 
 	if (status == 0x0) {
 		pr_info("Successfully transitioned all domains to low power state\n");
-		if (am33xx_lp_ipc.sleep_mode == DS0_ID)
-			per_pwrdm->ret_logic_off_counter++;
 		goto clear_old_status;
 	} else if (status == 0x10000) {
 		pr_err("Could not enter low power state\n"
@@ -506,79 +517,39 @@ static int __init clkdms_setup(struct clockdomain *clkdm, void *unused)
  */
 void am33xx_push_sram_idle(void)
 {
-	am33xx_do_wfi_sram = (void *)omap_sram_push
-					(am33xx_do_wfi, am33xx_do_wfi_sz);
+	am33xx_do_wfi_sram = omap_sram_push(am33xx_do_wfi, am33xx_do_wfi_sz);
 }
 
 static int __init am33xx_pm_init(void)
 {
 	int ret;
-#ifdef CONFIG_SUSPEND
-	void __iomem *base;
-	u32 reg;
-	u32 evm_id;
 
-#endif
 	if (!cpu_is_am33xx())
 		return -ENODEV;
 
 	pr_info("Power Management for AM33XX family\n");
 
 #ifdef CONFIG_SUSPEND
-/* Read SDRAM_CONFIG register to determine Memory Type */
-	base = am33xx_get_ram_base();
-	reg = readl(base + EMIF4_0_SDRAM_CONFIG);
-	reg = (reg & SDRAM_TYPE_MASK) >> SDRAM_TYPE_SHIFT;
-	suspend_cfg_param_list[MEMORY_TYPE] = reg;
-
-/*
- * vtp_ctrl register value for DDR2 and DDR3 as suggested
- * by h/w team
- */
-	if (reg == MEM_TYPE_DDR2)
-		suspend_cfg_param_list[SUSP_VTP_CTRL_VAL] = SUSP_VTP_CTRL_DDR2;
-	else
-		suspend_cfg_param_list[SUSP_VTP_CTRL_VAL] = SUSP_VTP_CTRL_DDR3;
-
-
-	/* Get Board Id */
-	evm_id = am335x_evm_get_id();
-	if (evm_id != -EINVAL)
-		suspend_cfg_param_list[EVM_ID] = evm_id;
-	else
-		suspend_cfg_param_list[EVM_ID] = 0xff;
-
-	/* CPU Revision */
-	reg = omap_rev();
-	if (reg == AM335X_REV_ES2_0)
-		suspend_cfg_param_list[CPU_REV] = CPU_REV_2;
-	else
-		suspend_cfg_param_list[CPU_REV] = CPU_REV_1;
-
 	(void) clkdm_for_each(clkdms_setup, NULL);
 
 	/* CEFUSE domain should be turned off post bootup */
 	cefuse_pwrdm = pwrdm_lookup("cefuse_pwrdm");
 	if (cefuse_pwrdm == NULL)
-		pr_err("Failed to get cefuse_pwrdm\n");
+		printk(KERN_ERR "Failed to get cefuse_pwrdm\n");
 	else
 		pwrdm_set_next_pwrst(cefuse_pwrdm, PWRDM_POWER_OFF);
 
 	gfx_pwrdm = pwrdm_lookup("gfx_pwrdm");
 	if (gfx_pwrdm == NULL)
-		pr_err("Failed to get gfx_pwrdm\n");
-
-	per_pwrdm = pwrdm_lookup("per_pwrdm");
-	if (per_pwrdm == NULL)
-		pr_err("Failed to get per_pwrdm\n");
+		printk(KERN_ERR "Failed to get gfx_pwrdm\n");
 
 	gfx_l3_clkdm = clkdm_lookup("gfx_l3_clkdm");
 	if (gfx_l3_clkdm == NULL)
-		pr_err("Failed to get gfx_l3_clkdm\n");
+		printk(KERN_ERR "Failed to get gfx_l3_clkdm\n");
 
 	gfx_l4ls_clkdm = clkdm_lookup("gfx_l4ls_gfx_clkdm");
 	if (gfx_l4ls_clkdm == NULL)
-		pr_err("Failed to get gfx_l4ls_gfx_clkdm\n");
+		printk(KERN_ERR "Failed to get gfx_l4ls_gfx_clkdm\n");
 
 	mpu_dev = omap_device_get_by_hwmod_name("mpu");
 

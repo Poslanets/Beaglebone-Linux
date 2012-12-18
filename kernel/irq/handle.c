@@ -60,7 +60,7 @@ static void irq_wake_thread(struct irq_desc *desc, struct irqaction *action)
 	 * device interrupt, so no irq storm is lurking. If the
 	 * RUNTHREAD bit is already set, nothing to do.
 	 */
-	if ((action->thread->flags & PF_EXITING) ||
+	if (test_bit(IRQTF_DIED, &action->thread_flags) ||
 	    test_and_set_bit(IRQTF_RUNTHREAD, &action->thread_flags))
 		return;
 
@@ -110,18 +110,6 @@ static void irq_wake_thread(struct irq_desc *desc, struct irqaction *action)
 	 * threads_oneshot untouched and runs the thread another time.
 	 */
 	desc->threads_oneshot |= action->thread_mask;
-
-	/*
-	 * We increment the threads_active counter in case we wake up
-	 * the irq thread. The irq thread decrements the counter when
-	 * it returns from the handler or in the exit path and wakes
-	 * up waiters which are stuck in synchronize_irq() when the
-	 * active count becomes zero. synchronize_irq() is serialized
-	 * against this code (hard irq handler) via IRQS_INPROGRESS
-	 * like the finalize_oneshot() code. See comment above.
-	 */
-	atomic_inc(&desc->threads_active);
-
 	wake_up_process(action->thread);
 }
 
@@ -129,7 +117,7 @@ irqreturn_t
 handle_irq_event_percpu(struct irq_desc *desc, struct irqaction *action)
 {
 	irqreturn_t retval = IRQ_NONE;
-	unsigned int random = 0, irq = desc->irq_data.irq;
+	unsigned int flags = 0, irq = desc->irq_data.irq;
 
 	do {
 		irqreturn_t res;
@@ -157,7 +145,7 @@ handle_irq_event_percpu(struct irq_desc *desc, struct irqaction *action)
 
 			/* Fall through to add to randomness */
 		case IRQ_HANDLED:
-			random |= action->flags;
+			flags |= action->flags;
 			break;
 
 		default:
@@ -168,8 +156,7 @@ handle_irq_event_percpu(struct irq_desc *desc, struct irqaction *action)
 		action = action->next;
 	} while (action);
 
-	if (random & IRQF_SAMPLE_RANDOM)
-		add_interrupt_randomness(irq);
+	add_interrupt_randomness(irq, flags);
 
 	if (!noirqdebug)
 		note_interrupt(irq, desc, retval);

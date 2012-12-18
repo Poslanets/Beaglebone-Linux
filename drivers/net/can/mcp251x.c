@@ -83,6 +83,11 @@
 #define INSTRUCTION_LOAD_TXB(n)	(0x40 + 2 * (n))
 #define INSTRUCTION_READ_RXB(n)	(((n) == 0) ? 0x90 : 0x94)
 #define INSTRUCTION_RESET	0xC0
+#define RTS_TXB0		0x01
+#define RTS_TXB1		0x02
+#define RTS_TXB2		0x04
+#define INSTRUCTION_RTS(n)	(0x80 | ((n) & 0x07))
+
 
 /* MPC251x registers */
 #define CANSTAT	      0x0e
@@ -93,8 +98,9 @@
 #  define CANCTRL_REQOP_LOOPBACK    0x40
 #  define CANCTRL_REQOP_SLEEP	    0x20
 #  define CANCTRL_REQOP_NORMAL	    0x00
-#  define CANCTRL_OSM		    0x08
 #  define CANCTRL_ABAT		    0x10
+#  define CANCTRL_OSM		    0x08
+#  define CANCTRL_CLKEN		    0x04
 #define TEC	      0x1c
 #define REC	      0x1d
 #define CNF1	      0x2a
@@ -287,7 +293,7 @@ static void mcp251x_clean(struct net_device *net)
 /*
  * Note about handling of error return of mcp251x_spi_trans: accessing
  * registers via SPI is not really different conceptually than using
- * normal I/O assembler instructions, although it's much more
+ * normal I/O assembly instructions, although it's much more
  * complicated from a practical POV. So it's not advisable to always
  * check the return value of this function. Imagine that every
  * read{b,l}, write{b,l} and friends would be bracketed in "if ( < 0)
@@ -397,6 +403,7 @@ static void mcp251x_hw_tx_frame(struct spi_device *spi, u8 *buf,
 static void mcp251x_hw_tx(struct spi_device *spi, struct can_frame *frame,
 			  int tx_buf_idx)
 {
+	struct mcp251x_priv *priv = dev_get_drvdata(&spi->dev);
 	u32 sid, eid, exide, rtr;
 	u8 buf[SPI_TRANSFER_BUF_LEN];
 
@@ -418,7 +425,10 @@ static void mcp251x_hw_tx(struct spi_device *spi, struct can_frame *frame,
 	buf[TXBDLC_OFF] = (rtr << DLC_RTR_SHIFT) | frame->can_dlc;
 	memcpy(buf + TXBDAT_OFF, frame->data, frame->can_dlc);
 	mcp251x_hw_tx_frame(spi, buf, frame->can_dlc, tx_buf_idx);
-	mcp251x_write_reg(spi, TXBCTRL(tx_buf_idx), TXBCTRL_TXREQ);
+
+	/* use INSTRUCTION_RTS, to avoid "repeated frame problem" */
+	priv->spi_tx_buf[0] = INSTRUCTION_RTS(1 << tx_buf_idx);
+	mcp251x_spi_trans(priv->spi, 1);
 }
 
 static void mcp251x_hw_rx_frame(struct spi_device *spi, u8 *buf,
@@ -490,7 +500,7 @@ static void mcp251x_hw_rx(struct spi_device *spi, int buf_idx)
 
 static void mcp251x_hw_sleep(struct spi_device *spi)
 {
-	mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_SLEEP);
+//	mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_SLEEP);
 }
 
 static netdev_tx_t mcp251x_hard_start_xmit(struct sk_buff *skb,
@@ -547,13 +557,16 @@ static int mcp251x_set_normal_mode(struct spi_device *spi)
 
 	if (priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK) {
 		/* Put device into loopback mode */
-		mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_LOOPBACK);
+		mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_LOOPBACK | CANCTRL_CLKEN);
 	} else if (priv->can.ctrlmode & CAN_CTRLMODE_LISTENONLY) {
 		/* Put device into listen-only mode */
-		mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_LISTEN_ONLY);
+		mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_LISTEN_ONLY | CANCTRL_CLKEN);
 	} else {
 		/* Put device into normal mode */
-		mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_NORMAL);
+		mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_NORMAL | CANCTRL_CLKEN);
+
+                netdev_info(priv->net, "CANCTRL: 0x%02x\n",
+                  mcp251x_read_reg(spi, CANCTRL));
 
 		/* Wait for the device to enter normal mode */
 		timeout = jiffies + HZ;
@@ -585,10 +598,14 @@ static int mcp251x_do_set_bittiming(struct net_device *net)
 			  (bt->prop_seg - 1));
 	mcp251x_write_bits(spi, CNF3, CNF3_PHSEG2_MASK,
 			   (bt->phase_seg2 - 1));
-	dev_info(&spi->dev, "CNF: 0x%02x 0x%02x 0x%02x\n",
+
+	netdev_info(net, "CNF: 0x%02x 0x%02x 0x%02x\n",
 		 mcp251x_read_reg(spi, CNF1),
 		 mcp251x_read_reg(spi, CNF2),
 		 mcp251x_read_reg(spi, CNF3));
+
+	netdev_info(net, "CANCTRL: 0x%02x\n",
+		 mcp251x_read_reg(spi, CANCTRL));
 
 	return 0;
 }
@@ -600,6 +617,7 @@ static int mcp251x_setup(struct net_device *net, struct mcp251x_priv *priv,
 
 	mcp251x_write_reg(spi, RXBCTRL(0),
 			  RXBCTRL_BUKT | RXBCTRL_RXM0 | RXBCTRL_RXM1);
+
 	mcp251x_write_reg(spi, RXBCTRL(1),
 			  RXBCTRL_RXM0 | RXBCTRL_RXM1);
 	return 0;
@@ -728,7 +746,9 @@ static void mcp251x_tx_work_handler(struct work_struct *ws)
 	mutex_lock(&priv->mcp_lock);
 	if (priv->tx_skb) {
 		if (priv->can.state == CAN_STATE_BUS_OFF) {
+
 			mcp251x_clean(net);
+
 		} else {
 			frame = (struct can_frame *)priv->tx_skb->data;
 
@@ -827,21 +847,37 @@ static irqreturn_t mcp251x_can_ist(int irq, void *dev_id)
 
 		/* Update can state */
 		if (eflag & EFLG_TXBO) {
+
+		        netdev_err(net, "err: bus off\n");
+
 			new_state = CAN_STATE_BUS_OFF;
 			can_id |= CAN_ERR_BUSOFF;
 		} else if (eflag & EFLG_TXEP) {
+
+		        netdev_err(net, "err: txep\n");
+
 			new_state = CAN_STATE_ERROR_PASSIVE;
 			can_id |= CAN_ERR_CRTL;
 			data1 |= CAN_ERR_CRTL_TX_PASSIVE;
+
 		} else if (eflag & EFLG_RXEP) {
+
+		        netdev_err(net, "err: rxep\n");
+
 			new_state = CAN_STATE_ERROR_PASSIVE;
 			can_id |= CAN_ERR_CRTL;
 			data1 |= CAN_ERR_CRTL_RX_PASSIVE;
 		} else if (eflag & EFLG_TXWAR) {
+
+		        netdev_err(net, "err: txwar\n");
+
 			new_state = CAN_STATE_ERROR_WARNING;
 			can_id |= CAN_ERR_CRTL;
 			data1 |= CAN_ERR_CRTL_TX_WARNING;
 		} else if (eflag & EFLG_RXWAR) {
+
+		        netdev_err(net, "err: rxwar\n");
+
 			new_state = CAN_STATE_ERROR_WARNING;
 			can_id |= CAN_ERR_CRTL;
 			data1 |= CAN_ERR_CRTL_RX_WARNING;
@@ -918,7 +954,7 @@ static int mcp251x_open(struct net_device *net)
 
 	ret = open_candev(net);
 	if (ret) {
-		dev_err(&spi->dev, "unable to set initial baudrate!\n");
+		netdev_err(net, "failed to open can device\n");
 		return ret;
 	}
 
@@ -934,7 +970,7 @@ static int mcp251x_open(struct net_device *net)
 		  pdata->irq_flags ? pdata->irq_flags : IRQF_TRIGGER_FALLING,
 		  DEVICE_NAME, priv);
 	if (ret) {
-		dev_err(&spi->dev, "failed to acquire irq %d\n", spi->irq);
+		netdev_err(net, "failed to acquire irq %d\n", spi->irq);
 		if (pdata->transceiver_enable)
 			pdata->transceiver_enable(0);
 		close_candev(net);
@@ -1071,7 +1107,7 @@ static int __devinit mcp251x_can_probe(struct spi_device *spi)
 
 	ret = register_candev(net);
 	if (!ret) {
-		dev_info(&spi->dev, "probed\n");
+		netdev_info(priv->net, "probed\n");
 		return ret;
 	}
 error_probe:

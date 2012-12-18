@@ -140,7 +140,7 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 			cmd->retries = 0;
 	}
 
-	if (err && cmd->retries && !mmc_card_removed(host->card)) {
+	if (err && cmd->retries) {
 		/*
 		 * Request starter must handle retries - see
 		 * mmc_wait_for_req_done().
@@ -243,17 +243,11 @@ static void mmc_wait_done(struct mmc_request *mrq)
 	complete(&mrq->completion);
 }
 
-static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
+static void __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
 {
 	init_completion(&mrq->completion);
 	mrq->done = mmc_wait_done;
-	if (mmc_card_removed(host->card)) {
-		mrq->cmd->error = -ENOMEDIUM;
-		complete(&mrq->completion);
-		return -ENOMEDIUM;
-	}
 	mmc_start_request(host, mrq);
-	return 0;
 }
 
 static void mmc_wait_for_req_done(struct mmc_host *host,
@@ -265,8 +259,7 @@ static void mmc_wait_for_req_done(struct mmc_host *host,
 		wait_for_completion(&mrq->completion);
 
 		cmd = mrq->cmd;
-		if (!cmd->error || !cmd->retries ||
-		    mmc_card_removed(host->card))
+		if (!cmd->error || !cmd->retries)
 			break;
 
 		pr_debug("%s: req failed (CMD%u): %d, retrying...\n",
@@ -331,7 +324,6 @@ struct mmc_async_req *mmc_start_req(struct mmc_host *host,
 				    struct mmc_async_req *areq, int *error)
 {
 	int err = 0;
-	int start_err = 0;
 	struct mmc_async_req *data = host->areq;
 
 	/* Prepare a new request */
@@ -341,23 +333,30 @@ struct mmc_async_req *mmc_start_req(struct mmc_host *host,
 	if (host->areq) {
 		mmc_wait_for_req_done(host, host->areq->mrq);
 		err = host->areq->err_check(host->card, host->areq);
+		if (err) {
+			/* post process the completed failed request */
+			mmc_post_req(host, host->areq->mrq, 0);
+			if (areq)
+				/*
+				 * Cancel the new prepared request, because
+				 * it can't run until the failed
+				 * request has been properly handled.
+				 */
+				mmc_post_req(host, areq->mrq, -EINVAL);
+
+			host->areq = NULL;
+			goto out;
+		}
 	}
 
-	if (!err && areq)
-		start_err = __mmc_start_req(host, areq->mrq);
+	if (areq)
+		__mmc_start_req(host, areq->mrq);
 
 	if (host->areq)
 		mmc_post_req(host, host->areq->mrq, 0);
 
-	 /* Cancel a prepared request if it was not started. */
-	if ((err || start_err) && areq)
-			mmc_post_req(host, areq->mrq, -EINVAL);
-
-	if (err)
-		host->areq = NULL;
-	else
-		host->areq = areq;
-
+	host->areq = areq;
+ out:
 	if (error)
 		*error = err;
 	return data;
@@ -1457,7 +1456,7 @@ void mmc_detect_change(struct mmc_host *host, unsigned long delay)
 	WARN_ON(host->removed);
 	spin_unlock_irqrestore(&host->lock, flags);
 #endif
-	host->detect_change = 1;
+
 	mmc_schedule_delayed_work(&host->detect, delay);
 }
 
@@ -1517,7 +1516,10 @@ static unsigned int mmc_mmc_erase_timeout(struct mmc_card *card,
 {
 	unsigned int erase_timeout;
 
-	if (card->ext_csd.erase_group_def & 1) {
+	if (arg == MMC_DISCARD_ARG ||
+	    (arg == MMC_TRIM_ARG && card->ext_csd.rev >= 6)) {
+		erase_timeout = card->ext_csd.trim_timeout;
+	} else if (card->ext_csd.erase_group_def & 1) {
 		/* High Capacity Erase Group Size uses HC timeouts */
 		if (arg == MMC_TRIM_ARG)
 			erase_timeout = card->ext_csd.trim_timeout;
@@ -1789,8 +1791,6 @@ int mmc_can_trim(struct mmc_card *card)
 {
 	if (card->ext_csd.sec_feature_support & EXT_CSD_SEC_GB_CL_EN)
 		return 1;
-	if (mmc_can_discard(card))
-		return 1;
 	return 0;
 }
 EXPORT_SYMBOL(mmc_can_trim);
@@ -1809,6 +1809,8 @@ EXPORT_SYMBOL(mmc_can_discard);
 
 int mmc_can_sanitize(struct mmc_card *card)
 {
+	if (!mmc_can_trim(card) && !mmc_can_erase(card))
+		return 0;
 	if (card->ext_csd.sec_feature_support & EXT_CSD_SEC_SANITIZE)
 		return 1;
 	return 0;
@@ -2050,61 +2052,6 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 	return -EIO;
 }
 
-int _mmc_detect_card_removed(struct mmc_host *host)
-{
-	int ret;
-
-	if ((host->caps & MMC_CAP_NONREMOVABLE) || !host->bus_ops->alive)
-		return 0;
-
-	if (!host->card || mmc_card_removed(host->card))
-		return 1;
-
-	ret = host->bus_ops->alive(host);
-	if (ret) {
-		mmc_card_set_removed(host->card);
-		pr_debug("%s: card remove detected\n", mmc_hostname(host));
-	}
-
-	return ret;
-}
-
-int mmc_detect_card_removed(struct mmc_host *host)
-{
-	struct mmc_card *card = host->card;
-	int ret;
-
-	WARN_ON(!host->claimed);
-
-	if (!card)
-		return 1;
-
-	ret = mmc_card_removed(card);
-	/*
-	 * The card will be considered unchanged unless we have been asked to
-	 * detect a change or host requires polling to provide card detection.
-	 */
-	if (!host->detect_change && !(host->caps & MMC_CAP_NEEDS_POLL) &&
-	    !(host->caps2 & MMC_CAP2_DETECT_ON_ERR))
-		return ret;
-
-	host->detect_change = 0;
-	if (!ret) {
-		ret = _mmc_detect_card_removed(host);
-		if (ret && (host->caps2 & MMC_CAP2_DETECT_ON_ERR)) {
-			/*
-			 * Schedule a detect work as soon as possible to let a
-			 * rescan handle the card removal.
-			 */
-			cancel_delayed_work(&host->detect);
-			mmc_detect_change(host, 0);
-		}
-	}
-
-	return ret;
-}
-EXPORT_SYMBOL(mmc_detect_card_removed);
-
 void mmc_rescan(struct work_struct *work)
 {
 	static const unsigned freqs[] = { 400000, 300000, 200000, 100000 };
@@ -2124,8 +2071,6 @@ void mmc_rescan(struct work_struct *work)
 	if (host->bus_ops && host->bus_ops->detect && !host->bus_dead
 	    && !(host->caps & MMC_CAP_NONREMOVABLE))
 		host->bus_ops->detect(host);
-
-	host->detect_change = 0;
 
 	/*
 	 * Let mmc_bus_put() free the bus/bus_ops if we've found that

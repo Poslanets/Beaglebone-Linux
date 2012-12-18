@@ -15,7 +15,6 @@
 #include <linux/io.h>
 #include <linux/clk.h>
 #include <linux/err.h>
-#include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/of.h>
 #include <linux/davinci_emac.h>
@@ -25,7 +24,7 @@
 #include <linux/can/platform/d_can.h>
 #include <linux/platform_data/uio_pruss.h>
 #include <linux/pwm/pwm.h>
-#include <linux/mfd/ti_tscadc.h>
+#include <linux/input/ti_tscadc.h>
 
 #include <mach/hardware.h>
 #include <mach/irqs.h>
@@ -51,7 +50,6 @@
 #include <plat/config_pwm.h>
 #include <plat/cpu.h>
 #include <plat/gpmc.h>
-#include <plat/am33xx.h>
 
 /* LCD controller similar DA8xx */
 #include <video/da8xx-fb.h>
@@ -174,22 +172,22 @@ int __init am33xx_register_lcdc(struct da8xx_lcdc_platform_data *pdata)
 	return 0;
 }
 
-int __init am33xx_register_mfd_tscadc(struct mfd_tscadc_board *pdata)
+int __init am33xx_register_tsc(struct tsc_data *pdata)
 {
 	int id = -1;
 	struct platform_device *pdev;
 	struct omap_hwmod *oh;
 	char *oh_name = "adc_tsc";
-	char *dev_name = "ti_tscadc";
+	char *dev_name = "tsc";
 
 	oh = omap_hwmod_lookup(oh_name);
 	if (!oh) {
-		pr_err("Could not look up TSCADC%d hwmod\n", id);
+		pr_err("Could not look up TSC%d hwmod\n", id);
 		return -ENODEV;
 	}
 
 	pdev = omap_device_build(dev_name, id, oh, pdata,
-			sizeof(struct mfd_tscadc_board), NULL, 0, 0);
+			sizeof(struct tsc_data), NULL, 0, 0);
 
 	WARN(IS_ERR(pdev), "Can't build omap_device for %s:%s.\n",
 			dev_name, oh->name);
@@ -220,7 +218,6 @@ int __init am335x_register_mcasp(struct snd_platform_data *pdata, int ctrl_nr)
 			dev_name, oh->name);
 	return IS_ERR(pdev) ? PTR_ERR(pdev) : 0;
 }
-
 #else
 int __init am335x_register_mcasp(struct snd_platform_data *pdata, int ctrl_nr)
 {
@@ -236,6 +233,7 @@ struct platform_device am33xx_pcm_device = {
 
 static void am33xx_init_pcm(void)
 {
+	printk("cape: pcm register");
 	platform_device_register(&am33xx_pcm_device);
 }
 
@@ -970,7 +968,7 @@ static struct event_to_channel_map am33xx_xbar_event_mapping[] = {
 	{27, -1},
 	{28, -1},
 	{29, -1},
-	{30, -1},
+	{30, 20},	/* XDMA_EVENT_INTR2 */
 	{31, -1},
 	{-1, -1}
 };
@@ -1007,14 +1005,14 @@ int map_xbar_event_to_channel(unsigned int event, unsigned int *channel,
 		/* confirm the range */
 		if (*channel < EDMA_MAX_DMACH)
 			clear_bit(*channel, edma_cc[ctrl]->edma_unused);
+		mask = (*channel)%4;
 		offset = (*channel)/4;
 		offset *= 4;
+		offset += mask;
 		val = (unsigned int)__raw_readl(AM33XX_CTRL_REGADDR(
 					AM33XX_SCM_BASE_EDMA + offset));
-		mask = *channel & 0x3;
-		mask <<= 3;
-		val &= ~(0xFF << mask);
-		val |= xbar_event_mapping[xbar_evt_no].xbar_event_no << mask;
+		val = val & (~(0xFF));
+		val = val | (xbar_event_mapping[xbar_evt_no].xbar_event_no);
 		__raw_writel(val,
 			AM33XX_CTRL_REGADDR(AM33XX_SCM_BASE_EDMA + offset));
 		return 0;
@@ -1191,23 +1189,19 @@ static int __init omap2_init_devices(void)
 arch_initcall(omap2_init_devices);
 
 #define AM33XX_EMAC_MDIO_FREQ		(1000000)
-/* Port Vlan IDs for Dual Mac Mode */
-#define CPSW_PORT_VLAN_SLAVE_0		2
-#define CPSW_PORT_VLAN_SLAVE_1		3
 
+static u64 am33xx_cpsw_dmamask = DMA_BIT_MASK(32);
 /* TODO : Verify the offsets */
 static struct cpsw_slave_data am33xx_cpsw_slaves[] = {
 	{
-		.slave_reg_ofs  = 0x200,
+		.slave_reg_ofs  = 0x208,
 		.sliver_reg_ofs = 0xd80,
 		.phy_id		= "0:00",
-		.dual_emac_reserved_vlan = CPSW_PORT_VLAN_SLAVE_0,
 	},
 	{
-		.slave_reg_ofs  = 0x300,
+		.slave_reg_ofs  = 0x308,
 		.sliver_reg_ofs = 0xdc0,
 		.phy_id		= "0:01",
-		.dual_emac_reserved_vlan = CPSW_PORT_VLAN_SLAVE_1,
 	},
 };
 
@@ -1221,9 +1215,6 @@ static struct cpsw_platform_data am33xx_cpsw_pdata = {
 	.ale_entries		= 1024,
 	.host_port_reg_ofs      = 0x108,
 	.hw_stats_reg_ofs       = 0x900,
-	.cpts_reg_ofs		= 0xc00,
-	.cpts_clock_mult	= 0x80000000,
-	.cpts_clock_shift	= 29,
 	.bd_ram_ofs		= 0x2000,
 	.bd_ram_size		= SZ_8K,
 	.rx_descs               = 64,
@@ -1238,8 +1229,85 @@ static struct mdio_platform_data am33xx_cpsw_mdiopdata = {
 	.bus_freq       = AM33XX_EMAC_MDIO_FREQ,
 };
 
+static struct resource am33xx_cpsw_mdioresources[] = {
+	{
+		.start  = AM33XX_CPSW_MDIO_BASE,
+		.end    = AM33XX_CPSW_MDIO_BASE + SZ_256 - 1,
+		.flags  = IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device am33xx_cpsw_mdiodevice = {
+	.name           = "davinci_mdio",
+	.id             = 0,
+	.num_resources  = ARRAY_SIZE(am33xx_cpsw_mdioresources),
+	.resource       = am33xx_cpsw_mdioresources,
+	.dev.platform_data = &am33xx_cpsw_mdiopdata,
+};
+
+static struct resource am33xx_cpsw_resources[] = {
+	{
+		.start  = AM33XX_CPSW_BASE,
+		.end    = AM33XX_CPSW_BASE + SZ_2K - 1,
+		.flags  = IORESOURCE_MEM,
+	},
+	{
+		.start  = AM33XX_CPSW_SS_BASE,
+		.end    = AM33XX_CPSW_SS_BASE + SZ_256 - 1,
+		.flags  = IORESOURCE_MEM,
+	},
+	{
+		.start	= AM33XX_IRQ_CPSW_C0_RX,
+		.end	= AM33XX_IRQ_CPSW_C0_RX,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= AM33XX_IRQ_DMTIMER5,
+		.end	= AM33XX_IRQ_DMTIMER5,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= AM33XX_IRQ_DMTIMER6,
+		.end	= AM33XX_IRQ_DMTIMER6,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= AM33XX_IRQ_CPSW_C0,
+		.end	= AM33XX_IRQ_CPSW_C0,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device am33xx_cpsw_device = {
+	.name		=	"cpsw",
+	.id		=	0,
+	.num_resources	=	ARRAY_SIZE(am33xx_cpsw_resources),
+	.resource	=	am33xx_cpsw_resources,
+	.dev		=	{
+					.platform_data	= &am33xx_cpsw_pdata,
+					.dma_mask	= &am33xx_cpsw_dmamask,
+					.coherent_dma_mask = DMA_BIT_MASK(32),
+				},
+};
+
 static unsigned char  am33xx_macid0[ETH_ALEN];
 static unsigned char  am33xx_macid1[ETH_ALEN];
+static unsigned int   am33xx_evmid;
+
+/*
+* am33xx_evmid_fillup - set up board evmid
+* @evmid - evm id which needs to be configured
+*
+* This function is called to configure board evm id.
+* IA Motor Control EVM needs special setting of MAC PHY Id.
+* This function is called when IA Motor Control EVM is detected
+* during boot-up.
+*/
+void am33xx_evmid_fillup(unsigned int evmid)
+{
+	am33xx_evmid = evmid;
+	return;
+}
 
 /*
 * am33xx_cpsw_macidfillup - setup mac adrresses
@@ -1265,12 +1333,14 @@ void am33xx_cpsw_macidfillup(char *eeprommacid0, char *eeprommacid1)
 	return;
 }
 
-int am33xx_cpsw_init(enum am33xx_cpsw_mac_mode mode, unsigned char *phy_id0,
-		     unsigned char *phy_id1)
+#define MII_MODE_ENABLE		0x0
+#define RMII_MODE_ENABLE	0x5
+#define RGMII_MODE_ENABLE	0xA
+#define MAC_MII_SEL		0x650
+
+void am33xx_cpsw_init(unsigned int gigen)
 {
-	struct omap_hwmod *oh;
-	struct platform_device *pdev;
-	u32 mac_lo, mac_hi, gmii_sel;
+	u32 mac_lo, mac_hi;
 	u32 i;
 
 	mac_lo = omap_ctrl_readl(TI81XX_CONTROL_MAC_ID0_LO);
@@ -1303,54 +1373,28 @@ int am33xx_cpsw_init(enum am33xx_cpsw_mac_mode mode, unsigned char *phy_id0,
 			am33xx_cpsw_slaves[1].mac_addr[i] = am33xx_macid1[i];
 	}
 
-	switch (mode) {
-	case AM33XX_CPSW_MODE_MII:
-		gmii_sel = AM33XX_MII_MODE_EN;
-		break;
-	case AM33XX_CPSW_MODE_RMII:
-		gmii_sel = AM33XX_RMII_MODE_EN;
-		break;
-	case AM33XX_CPSW_MODE_RGMII:
-		gmii_sel = AM33XX_RGMII_MODE_EN;
-		break;
-	default:
-		return -EINVAL;
+	if (am33xx_evmid == BEAGLE_BONE_OLD) {
+		__raw_writel(RMII_MODE_ENABLE,
+				AM33XX_CTRL_REGADDR(MAC_MII_SEL));
+	} else if (am33xx_evmid == BEAGLE_BONE_A3) {
+		__raw_writel(MII_MODE_ENABLE,
+				AM33XX_CTRL_REGADDR(MAC_MII_SEL));
+	} else if (am33xx_evmid == IND_AUT_MTR_EVM) {
+		am33xx_cpsw_slaves[0].phy_id = "0:1e";
+		am33xx_cpsw_slaves[1].phy_id = "0:00";
+	} else {
+		__raw_writel(RGMII_MODE_ENABLE,
+				AM33XX_CTRL_REGADDR(MAC_MII_SEL));
 	}
 
-	writel(gmii_sel, AM33XX_CTRL_REGADDR(AM33XX_CONTROL_GMII_SEL_OFFSET));
-
-	if (phy_id0 != NULL)
-		am33xx_cpsw_slaves[0].phy_id = phy_id0;
-
-	if (phy_id1 != NULL)
-		am33xx_cpsw_slaves[1].phy_id = phy_id1;
+	am33xx_cpsw_pdata.gigabit_en = gigen;
 
 	memcpy(am33xx_cpsw_pdata.mac_addr,
 			am33xx_cpsw_slaves[0].mac_addr, ETH_ALEN);
-
-	oh = omap_hwmod_lookup("mdio");
-	if (!oh) {
-		pr_err("could not find cpgmac0 hwmod data\n");
-		return -ENODEV;
-	}
-
-	pdev = omap_device_build("davinci_mdio", 0, oh, &am33xx_cpsw_mdiopdata,
-			sizeof(am33xx_cpsw_mdiopdata), NULL, 0, 0);
-	if (IS_ERR(pdev))
-		pr_err("could not build omap_device for cpsw\n");
-
-	oh = omap_hwmod_lookup("cpgmac0");
-	if (!oh) {
-		pr_err("could not find cpgmac0 hwmod data\n");
-		return -ENODEV;
-	}
-
-	pdev = omap_device_build("cpsw", -1, oh, &am33xx_cpsw_pdata,
-			sizeof(am33xx_cpsw_pdata), NULL, 0, 0);
-	if (IS_ERR(pdev))
-		pr_err("could not build omap_device for cpsw\n");
-
-	return 0;
+	platform_device_register(&am33xx_cpsw_mdiodevice);
+	platform_device_register(&am33xx_cpsw_device);
+	clk_add_alias(NULL, dev_name(&am33xx_cpsw_mdiodevice.dev),
+			NULL, &am33xx_cpsw_device.dev);
 }
 
 #define AM33XX_DCAN_NUM_MSG_OBJS		64

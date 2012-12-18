@@ -1344,11 +1344,9 @@ static int _deassert_hardreset(struct omap_hwmod *oh, const char *name)
 	 */
 	if (cpu_is_omap44xx() || cpu_is_am33xx()) {
 		ret = omap4_prminst_deassert_hardreset(ohri.rst_shift,
-				  ohri.st_shift,
 				  oh->clkdm->pwrdm.ptr->prcm_partition,
 				  oh->clkdm->pwrdm.ptr->prcm_offs,
-				  oh->prcm.omap4.rstctrl_offs,
-				  oh->prcm.omap4.rstst_offs);
+				  oh->prcm.omap4.rstctrl_offs);
 	} else if (cpu_is_omap24xx() || cpu_is_omap34xx()) {
 		ret = omap2_prm_deassert_hardreset(oh->prcm.omap2.module_offs,
 						   ohri.rst_shift,
@@ -1547,6 +1545,16 @@ static int _enable(struct omap_hwmod *oh)
 		return -EINVAL;
 	}
 
+
+	/*
+	 * If an IP contains only one HW reset line, then de-assert it in order
+	 * to allow the module state transition. Otherwise the PRCM will return
+	 * Intransition status, and the init will failed.
+	 */
+	if ((oh->_state == _HWMOD_STATE_INITIALIZED ||
+	     oh->_state == _HWMOD_STATE_DISABLED) && oh->rst_lines_cnt == 1)
+		_deassert_hardreset(oh, oh->rst_lines[0].name);
+
 	/* Mux pins for device runtime if populated */
 	if (oh->mux && (!oh->mux->enabled ||
 			((oh->_state == _HWMOD_STATE_IDLE) &&
@@ -1572,18 +1580,6 @@ static int _enable(struct omap_hwmod *oh)
 
 	_enable_clocks(oh);
 	_enable_module(oh);
-
-	/*
-	 * If an IP contains only one HW reset line, then de-assert it in order
-	 * to allow the module state transition. Otherwise the PRCM will return
-	 * Intransition status, and the init will failed.
-	 *
-	 * TODO: Based on observation, on module enable sate, we can safely
-	 *	assert the reset signal here (irrespective of idlemode state).
-	 */
-	if ((oh->_state == _HWMOD_STATE_INITIALIZED ||
-	     oh->_state == _HWMOD_STATE_DISABLED) && oh->rst_lines_cnt == 1)
-		_deassert_hardreset(oh, oh->rst_lines[0].name);
 
 	r = _wait_target_ready(oh);
 	if (!r) {
@@ -1631,13 +1627,6 @@ static int _idle(struct omap_hwmod *oh)
 		     "enabled state\n", oh->name);
 		return -EINVAL;
 	}
-
-	/*
-	 * FIXME: Due to AM33XX CPSW IP integration bug, it is required
-	 * to assert ocp reset signal to the module before disabling it.
-	 */
-	if (oh->flags & HWMOD_SWSUP_RESET_BEFORE_IDLE)
-		_reset(oh);
 
 	if (oh->class->sysc)
 		_idle_sysc(oh);

@@ -408,6 +408,8 @@ static int omap_i2c_init(struct omap_i2c_dev *dev)
 		if (dev->speed > 400 ||
 			       pdata->flags & OMAP_I2C_FLAG_FORCE_19200_INT_CLK)
 			internal_clk = 19200;
+		else if (pdata->flags & OMAP_I2C_FLAG_FORCE_12000_INT_CLK)
+			internal_clk = 12000;
 		else if (dev->speed > 100)
 			internal_clk = 9600;
 		else
@@ -1064,7 +1066,7 @@ omap_i2c_probe(struct platform_device *pdev)
 
 	isr = (dev->rev < OMAP_I2C_OMAP1_REV_2) ? omap_i2c_omap1_isr :
 								   omap_i2c_isr;
-	r = request_irq(dev->irq, isr, IRQF_NO_SUSPEND, pdev->name, dev);
+	r = request_irq(dev->irq, isr, 0, pdev->name, dev);
 
 	if (r) {
 		dev_err(dev->dev, "failure requesting irq %i\n", dev->irq);

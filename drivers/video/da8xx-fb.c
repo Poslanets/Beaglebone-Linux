@@ -152,20 +152,6 @@ static inline void lcdc_write(unsigned int val, unsigned int addr)
 	writel(val, da8xx_fb_reg_base + (addr));
 }
 
-struct da8xx_panel {
-	const char	name[25];	/* Full name <vendor>_<model> */
-	unsigned short	width;
-	unsigned short	height;
-	int		hfp;		/* Horizontal front porch */
-	int		hbp;		/* Horizontal back porch */
-	int		hsw;		/* Horizontal Sync Pulse Width */
-	int		vfp;		/* Vertical front porch */
-	int		vbp;		/* Vertical back porch */
-	int		vsw;		/* Vertical Sync Pulse Width */
-	unsigned int	pxl_clk;	/* Pixel clock */
-	unsigned char	invert_pxl_clk;	/* Invert Pixel clock */
-};
-
 struct da8xx_fb_par {
 	struct device *dev;
 	resource_size_t p_palette_base;
@@ -196,8 +182,6 @@ struct da8xx_fb_par {
 	unsigned int		lcd_fck_rate;
 #endif
 	void (*panel_power_ctrl)(int);
-	struct da8xx_panel	*lcdc_info;
-	struct lcd_ctrl_config	*lcd_cfg;
 };
 
 /* Variable Screen Information */
@@ -227,6 +211,20 @@ static struct fb_fix_screeninfo da8xx_fb_fix __devinitdata = {
 	.ypanstep = 1,
 	.ywrapstep = 0,
 	.accel = FB_ACCEL_NONE
+};
+
+struct da8xx_panel {
+	const char	name[25];	/* Full name <vendor>_<model> */
+	unsigned short	width;
+	unsigned short	height;
+	int		hfp;		/* Horizontal front porch */
+	int		hbp;		/* Horizontal back porch */
+	int		hsw;		/* Horizontal Sync Pulse Width */
+	int		vfp;		/* Vertical front porch */
+	int		vbp;		/* Vertical back porch */
+	int		vsw;		/* Vertical Sync Pulse Width */
+	unsigned int	pxl_clk;	/* Pixel clock */
+	unsigned char	invert_pxl_clk;	/* Invert Pixel clock */
 };
 
 static vsync_callback_t vsync_cb_handler;
@@ -275,8 +273,36 @@ static struct da8xx_panel known_lcd_panels[] = {
 		.pxl_clk = 30000000,
 		.invert_pxl_clk = 0,
 	},
-	/* Newhaven Display */
 	[3] = {
+		 /* 1024 x 768 @ 60 Hz  Reduced blanking VESA CVT 0.79M3-R */ 
+		.name = "1024x768@60",
+		.width = 1024,
+		.height = 768,
+		.hfp = 48,
+		.hbp = 80,
+		.hsw = 32,
+		.vfp = 3,
+		.vbp = 15,
+		.vsw = 4,
+		.pxl_clk = 56000000,
+		.invert_pxl_clk = 0,
+	},
+	[4] = {
+		 /* CDTech S035Q01 */ 
+		.name = "CDTech_S035Q01",
+		.width = 320,
+		.height = 240,
+		.hfp = 58,
+		.hbp = 21,
+		.hsw = 47,
+		.vfp = 23,
+		.vbp = 11,
+		.vsw = 2,
+		.pxl_clk = 8000000,
+		.invert_pxl_clk = 0,
+	},	
+	/* Newhaven Display */
+	[5] = {
 		.name = "NHD-4.3-ATXI#-T-1",
 		.width = 480,
 		.height = 272,
@@ -290,11 +316,6 @@ static struct da8xx_panel known_lcd_panels[] = {
 		.invert_pxl_clk = 0,
 	},
 };
-
-static inline bool is_raster_enabled(void)
-{
-	return !!(lcdc_read(LCD_RASTER_CTRL_REG) & LCD_RASTER_ENABLE);
-}
 
 /* Enable the Raster Engine of the LCD Controller */
 static inline void lcd_enable_raster(void)
@@ -703,6 +724,9 @@ static int fb_setcolreg(unsigned regno, unsigned red, unsigned green,
 
 static void lcd_reset(struct da8xx_fb_par *par)
 {
+	/* Disable the Raster if previously Enabled */
+	lcd_disable_raster(NO_WAIT_FOR_FRAME_DONE);
+
 	/* DMA has to be disabled */
 	lcdc_write(0, LCD_DMA_CTRL_REG);
 	lcdc_write(0, LCD_RASTER_CTRL_REG);
@@ -737,6 +761,8 @@ static int lcd_init(struct da8xx_fb_par *par, const struct lcd_ctrl_config *cfg,
 {
 	u32 bpp;
 	int ret = 0;
+
+	lcd_reset(par);
 
 	/* Calculate the divider */
 	lcd_calc_clk_divider(par);
@@ -939,9 +965,6 @@ static int fb_check_var(struct fb_var_screeninfo *var,
 			struct fb_info *info)
 {
 	int err = 0;
-	struct da8xx_fb_par *par = info->par;
-	int bpp = var->bits_per_pixel >> 3;
-	unsigned long line_size = var->xres_virtual * bpp;
 
 	switch (var->bits_per_pixel) {
 	case 1:
@@ -1001,21 +1024,6 @@ static int fb_check_var(struct fb_var_screeninfo *var,
 	var->green.msb_right = 0;
 	var->blue.msb_right = 0;
 	var->transp.msb_right = 0;
-
-	if (line_size * var->yres_virtual > par->vram_size)
-		var->yres_virtual = par->vram_size / line_size;
-
-	if (var->yres > var->yres_virtual)
-		var->yres = var->yres_virtual;
-
-	if (var->xres > var->xres_virtual)
-		var->xres = var->xres_virtual;
-
-	if (var->xres + var->xoffset > var->xres_virtual)
-		var->xoffset = var->xres_virtual - var->xres;
-	if (var->yres + var->yoffset > var->yres_virtual)
-		var->yoffset = var->yres_virtual - var->yres;
-
 	return err;
 }
 
@@ -1182,9 +1190,6 @@ static int cfb_blank(int blank, struct fb_info *info)
 
 		lcd_enable_raster();
 		break;
-	case FB_BLANK_NORMAL:
-	case FB_BLANK_VSYNC_SUSPEND:
-	case FB_BLANK_HSYNC_SUSPEND:
 	case FB_BLANK_POWERDOWN:
 		if (par->panel_power_ctrl)
 			par->panel_power_ctrl(0);
@@ -1250,60 +1255,9 @@ static int da8xx_pan_display(struct fb_var_screeninfo *var,
 	return ret;
 }
 
-static int da8xxfb_set_par(struct fb_info *info)
-{
-	struct da8xx_fb_par *par = info->par;
-	struct lcd_ctrl_config *lcd_cfg = par->lcd_cfg;
-	struct da8xx_panel *lcdc_info = par->lcdc_info;
-	unsigned long long pxl_clk = 1000000000000ULL;
-	bool raster;
-	int ret;
-
-	raster = is_raster_enabled();
-
-	lcdc_info->hfp = info->var.right_margin;
-	lcdc_info->hbp = info->var.left_margin;
-	lcdc_info->vfp = info->var.lower_margin;
-	lcdc_info->vbp = info->var.upper_margin;
-	lcdc_info->hsw = info->var.hsync_len;
-	lcdc_info->vsw = info->var.vsync_len;
-	lcdc_info->width = info->var.xres;
-	lcdc_info->height = info->var.yres;
-
-	do_div(pxl_clk, info->var.pixclock);
-	par->pxl_clk = pxl_clk;
-
-	lcd_cfg->bpp = info->var.bits_per_pixel;
-
-	if (raster)
-		lcd_disable_raster(WAIT_FOR_FRAME_DONE);
-	else
-		lcd_disable_raster(NO_WAIT_FOR_FRAME_DONE);
-
-	info->fix.visual = (lcd_cfg->bpp <= 8) ?
-				FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_TRUECOLOR;
-	info->fix.line_length = (lcdc_info->width * lcd_cfg->bpp) / 8;
-
-	par->dma_start = par->vram_phys;
-	par->dma_end   = par->dma_start + lcdc_info->height *
-				info->fix.line_length - 1;
-
-	ret = lcd_init(par, lcd_cfg, lcdc_info);
-	if (ret < 0) {
-		dev_err(par->dev, "lcd init failed\n");
-		return ret;
-	}
-
-	if (raster)
-		lcd_enable_raster();
-
-	return 0;
-}
-
 static struct fb_ops da8xx_fb_ops = {
 	.owner = THIS_MODULE,
 	.fb_check_var = fb_check_var,
-	.fb_set_par = da8xxfb_set_par,
 	.fb_setcolreg = fb_setcolreg,
 	.fb_pan_display = da8xx_pan_display,
 	.fb_ioctl = fb_ioctl,
@@ -1432,7 +1386,11 @@ static int __devinit fb_probe(struct platform_device *device)
 		par->panel_power_ctrl(1);
 	}
 
-	lcd_reset(par);
+	if (lcd_init(par, lcd_cfg, lcdc_info) < 0) {
+		dev_err(&device->dev, "lcd_init failed\n");
+		ret = -EFAULT;
+		goto err_release_fb;
+	}
 
 	/* allocate frame buffer */
 	par->vram_size = lcdc_info->width * lcdc_info->height * lcd_cfg->bpp;
@@ -1515,9 +1473,6 @@ static int __devinit fb_probe(struct platform_device *device)
 	if (ret)
 		goto err_release_pl_mem;
 	da8xx_fb_info->cmap.len = par->palette_sz;
-
-	par->lcdc_info = lcdc_info;
-	par->lcd_cfg = lcd_cfg;
 
 	/* initialize var_screeninfo */
 	da8xx_fb_var.activate = FB_ACTIVATE_FORCE;

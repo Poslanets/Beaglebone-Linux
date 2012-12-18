@@ -522,41 +522,55 @@ static inline void omap_mux_decode(struct seq_file *s, u16 val)
 	i++;
 	flags[i] = mode;
 
-	OMAP_MUX_TEST_FLAG(val, OMAP_PIN_OFF_WAKEUPENABLE);
-	if (val & OMAP_OFF_EN) {
-		if (!(val & OMAP_OFFOUT_EN)) {
-			if (!(val & OMAP_OFF_PULL_UP)) {
-				OMAP_MUX_TEST_FLAG(val,
-					OMAP_PIN_OFF_INPUT_PULLDOWN);
+	if (cpu_is_am33xx()) {
+		if (val & AM33XX_INPUT_EN) {
+			if (val & AM33XX_PULL_DISA) {
+				flags[ ++i] = "OMAP_PIN_INPUT";
+			} else if (val & AM33XX_PULL_UP) {
+				flags[ ++i] = "OMAP_PIN_INPUT_PULLUP";
 			} else {
-				OMAP_MUX_TEST_FLAG(val,
-					OMAP_PIN_OFF_INPUT_PULLUP);
+				flags[ ++i] = "OMAP_PIN_INPUT_PULLDOWN";
 			}
 		} else {
-			if (!(val & OMAP_OFFOUT_VAL)) {
-				OMAP_MUX_TEST_FLAG(val,
-					OMAP_PIN_OFF_OUTPUT_LOW);
-			} else {
-				OMAP_MUX_TEST_FLAG(val,
-					OMAP_PIN_OFF_OUTPUT_HIGH);
-			}
-		}
-	}
-
-	if (val & OMAP_INPUT_EN) {
-		if (val & OMAP_PULL_ENA) {
-			if (!(val & OMAP_PULL_UP)) {
-				OMAP_MUX_TEST_FLAG(val,
-					OMAP_PIN_INPUT_PULLDOWN);
-			} else {
-				OMAP_MUX_TEST_FLAG(val, OMAP_PIN_INPUT_PULLUP);
-			}
-		} else {
-			OMAP_MUX_TEST_FLAG(val, OMAP_PIN_INPUT);
+			flags[ ++i] = "OMAP_PIN_OUTPUT";
 		}
 	} else {
-		i++;
-		flags[i] = "OMAP_PIN_OUTPUT";
+		OMAP_MUX_TEST_FLAG(val, OMAP_PIN_OFF_WAKEUPENABLE);
+		if (val & OMAP_OFF_EN) {
+			if (!(val & OMAP_OFFOUT_EN)) {
+				if (!(val & OMAP_OFF_PULL_UP)) {
+					OMAP_MUX_TEST_FLAG(val,
+							OMAP_PIN_OFF_INPUT_PULLDOWN);
+				} else {
+					OMAP_MUX_TEST_FLAG(val,
+							OMAP_PIN_OFF_INPUT_PULLUP);
+				}
+			} else {
+				if (!(val & OMAP_OFFOUT_VAL)) {
+					OMAP_MUX_TEST_FLAG(val,
+							OMAP_PIN_OFF_OUTPUT_LOW);
+				} else {
+					OMAP_MUX_TEST_FLAG(val,
+							OMAP_PIN_OFF_OUTPUT_HIGH);
+				}
+			}
+		}
+
+		if (val & OMAP_INPUT_EN) {
+			if (val & OMAP_PULL_ENA) {
+				if (!(val & OMAP_PULL_UP)) {
+					OMAP_MUX_TEST_FLAG(val,
+							OMAP_PIN_INPUT_PULLDOWN);
+				} else {
+					OMAP_MUX_TEST_FLAG(val, OMAP_PIN_INPUT_PULLUP);
+				}
+			} else {
+				OMAP_MUX_TEST_FLAG(val, OMAP_PIN_INPUT);
+			}
+		} else {
+			i++;
+			flags[i] = "OMAP_PIN_OUTPUT";
+		}
 	}
 
 	do {
@@ -564,48 +578,6 @@ static inline void omap_mux_decode(struct seq_file *s, u16 val)
 		if (i > 0)
 			seq_printf(s, " | ");
 	} while (i-- > 0);
-}
-
-static inline void am33xx_mux_decode(struct seq_file *s, u16 val)
-{
-	char *flags[OMAP_MUX_MAX_NR_FLAGS];
-	char mode[sizeof("OMAP_MUX_MODE") + 1];
-	int i , j;
-
-	i = j = 0;
-	sprintf(mode, "OMAP_MUX_MODE%d", val & 0x7);
-	flags[i] = mode;
-
-	if (val & AM33XX_INPUT_EN) {
-		j = 1;
-		if (val & AM33XX_PULL_DISA) {
-			OMAP_MUX_TEST_FLAG(val, AM33XX_PIN_INPUT);
-		} else if (!(val & AM33XX_PULL_UP)) {
-			OMAP_MUX_TEST_FLAG(val, AM33XX_PIN_INPUT_PULLDOWN);
-		} else {
-			OMAP_MUX_TEST_FLAG(val, AM33XX_PIN_INPUT_PULLUP);
-		}
-	}
-	if (val & AM33XX_SLEWCTRL_SLOW) {
-		j = 1;
-		OMAP_MUX_TEST_FLAG(val, AM33XX_SLEWCTRL_SLOW);
-	} else if (!(val & AM33XX_INPUT_EN)) {
-		if (val & AM33XX_PIN_OUTPUT_PULLUP) {
-			j = 1;
-			OMAP_MUX_TEST_FLAG(val, AM33XX_PIN_OUTPUT_PULLUP);
-		} else if (val & AM33XX_PULL_DISA) {
-			j = 1;
-			OMAP_MUX_TEST_FLAG(val, AM33XX_PULL_DISA);
-		}
-	}
-	if (j == 0)
-		OMAP_MUX_TEST_FLAG(val, AM33XX_PIN_OUTPUT);
-
-	for (j = 0; j <= i; j++) {
-		seq_printf(s, "%s", flags[j]);
-		if (j != i)
-			seq_printf(s, " | ");
-	}
 }
 
 #define OMAP_MUX_DEFNAME_LEN	32
@@ -644,10 +616,7 @@ static int omap_mux_dbg_board_show(struct seq_file *s, void *unused)
 		 * same OMAP generation.
 		 */
 		seq_printf(s, "OMAP%d_MUX(%s, ", omap_gen, m0_def);
-		if (cpu_is_am335x())
-			am33xx_mux_decode(s, val);
-		else
-			omap_mux_decode(s, val);
+		omap_mux_decode(s, val);
 		seq_printf(s, "),\n");
 	}
 
@@ -706,10 +675,7 @@ static int omap_mux_dbg_signal_show(struct seq_file *s, void *unused)
 			m->balls[0] ? m->balls[0] : none,
 			m->balls[1] ? m->balls[1] : none);
 	seq_printf(s, "mode: ");
-	if (cpu_is_am335x())
-		am33xx_mux_decode(s, val);
-	else
-		omap_mux_decode(s, val);
+	omap_mux_decode(s, val);
 	seq_printf(s, "\n");
 	seq_printf(s, "signals: %s | %s | %s | %s | %s | %s | %s | %s\n",
 			m->muxnames[0] ? m->muxnames[0] : none,

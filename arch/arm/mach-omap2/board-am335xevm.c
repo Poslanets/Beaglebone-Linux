@@ -19,6 +19,7 @@
 #include <linux/i2c/at24.h>
 #include <linux/phy.h>
 #include <linux/gpio.h>
+#include <linux/leds.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/flash.h>
 #include <linux/gpio_keys.h>
@@ -30,18 +31,19 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/err.h>
-#include <linux/export.h>
 #include <linux/wl12xx.h>
 #include <linux/ethtool.h>
 #include <linux/mfd/tps65910.h>
 #include <linux/mfd/tps65217.h>
 #include <linux/pwm_backlight.h>
-#include <linux/input/ti_tsc.h>
-#include <linux/mfd/ti_tscadc.h>
 #include <linux/reboot.h>
 #include <linux/pwm/pwm.h>
-#include <linux/rtc/rtc-omap.h>
 #include <linux/opp.h>
+#include <linux/w1-gpio.h>
+#include <linux/can/platform/mcp251x.h>
+#include <linux/input/ti_tscadc.h>
+
+#include <sound/tlv320aic3x.h>
 
 /* LCD controller is similar to DA850 */
 #include <video/da8xx-fb.h>
@@ -63,6 +65,10 @@
 #include <plat/mmc.h>
 #include <plat/emif.h>
 #include <plat/nand.h>
+#include <plat/dma-33xx.h>
+
+#include <media/soc_camera.h>
+#include <media/mt9t112.h>
 
 #include "board-flash.h"
 #include "cpuidle33xx.h"
@@ -73,17 +79,61 @@
 /* Convert GPIO signal to GPIO pin number */
 #define GPIO_TO_PIN(bank, gpio) (32 * (bank) + (gpio))
 
+/* TLK PHY IDs */
+#define TLK110_PHY_ID		0x2000A201
+#define TLK110_PHY_MASK		0xfffffff0
+
 /* BBB PHY IDs */
 #define BBB_PHY_ID		0x7c0f1
 #define BBB_PHY_MASK		0xfffffffe
 
-/* AM335X EVM Phy ID and Debug Registers */
-#define AM335X_EVM_PHY_ID		0x4dd074
-#define AM335X_EVM_PHY_MASK		0xfffffffe
-#define AR8051_PHY_DEBUG_ADDR_REG	0x1d
-#define AR8051_PHY_DEBUG_DATA_REG	0x1e
-#define AR8051_DEBUG_RGMII_CLK_DLY_REG	0x5
-#define AR8051_RGMII_TX_CLK_DLY		BIT(8)
+/* TLK110 PHY register offsets */
+#define TLK110_COARSEGAIN_REG	0x00A3
+#define TLK110_LPFHPF_REG	0x00AC
+#define TLK110_SPAREANALOG_REG	0x00B9
+#define TLK110_VRCR_REG		0x00D0
+#define TLK110_SETFFE_REG	0x0107
+#define TLK110_FTSP_REG		0x0154
+#define TLK110_ALFATPIDL_REG	0x002A
+#define TLK110_PSCOEF21_REG	0x0096
+#define TLK110_PSCOEF3_REG	0x0097
+#define TLK110_ALFAFACTOR1_REG	0x002C
+#define TLK110_ALFAFACTOR2_REG	0x0023
+#define TLK110_CFGPS_REG	0x0095
+#define TLK110_FTSPTXGAIN_REG	0x0150
+#define TLK110_SWSCR3_REG	0x000B
+#define TLK110_SCFALLBACK_REG	0x0040
+#define TLK110_PHYRCR_REG	0x001F
+
+/* TLK110 register writes values */
+#define TLK110_COARSEGAIN_VAL	0x0000
+#define TLK110_LPFHPF_VAL	0x8000
+#define TLK110_SPANALOG_VAL	0x0000
+#define TLK110_VRCR_VAL		0x0008
+#define TLK110_SETFFE_VAL	0x0605
+#define TLK110_FTSP_VAL		0x0255
+#define TLK110_ALFATPIDL_VAL	0x7998
+#define TLK110_PSCOEF21_VAL	0x3A20
+#define TLK110_PSCOEF3_VAL	0x003F
+#define TLK110_ALFACTOR1_VAL	0xFF80
+#define TLK110_ALFACTOR2_VAL	0x021C
+#define TLK110_CFGPS_VAL	0x0000
+#define TLK110_FTSPTXGAIN_VAL	0x6A88
+#define TLK110_SWSCR3_VAL	0x0000
+#define TLK110_SCFALLBACK_VAL	0xC11D
+#define TLK110_PHYRCR_VAL	0x4000
+
+#if defined(CONFIG_TLK110_WORKAROUND) || \
+		defined(CONFIG_TLK110_WORKAROUND_MODULE)
+#define am335x_tlk110_phy_init()\
+	do {	\
+		phy_register_fixup_for_uid(TLK110_PHY_ID,\
+					TLK110_PHY_MASK,\
+					am335x_tlk110_phy_fixup);\
+	} while (0);
+#else
+#define am335x_tlk110_phy_init() do { } while (0);
+#endif
 
 static const struct display_panel disp_panel = {
 	WVGA,
@@ -92,13 +142,45 @@ static const struct display_panel disp_panel = {
 	COLOR_ACTIVE,
 };
 
+
+#if defined(CONFIG_CHARGER_GPIO)
+
+#include <linux/power_supply.h>
+#include <linux/power/gpio-charger.h>
+
+/* charger */
+static char *beaglebone_batteries[] = {
+	"battery",
+};
+
+static struct gpio_charger_platform_data beaglebone_charger_pdata = {
+	.name = "battery-cape",
+	.type = POWER_SUPPLY_TYPE_BATTERY,
+	.gpio = GPIO_TO_PIN(1,16),
+	.gpio_active_low = 0,
+	.supplied_to = beaglebone_batteries,
+	.num_supplicants = ARRAY_SIZE(beaglebone_batteries),
+};
+
+static struct platform_device beaglebone_charger_device = {
+	.name = "gpio-charger",
+	.dev = {
+		.platform_data = &beaglebone_charger_pdata,
+	},
+};
+
+#endif /* gpio-charger */
+
+
 /* LCD backlight platform Data */
 #define AM335X_BACKLIGHT_MAX_BRIGHTNESS        100
-#define AM335X_BACKLIGHT_DEFAULT_BRIGHTNESS    100
-#define AM335X_PWM_PERIOD_NANO_SECONDS        (5000 * 10)
+#define AM335X_BACKLIGHT_DEFAULT_BRIGHTNESS    50
+#define AM335X_PWM_PERIOD_NANO_SECONDS        (1000000 * 5)
 
-static struct platform_pwm_backlight_data am335x_backlight_data0 = {
-	.pwm_id         = "ecap.0",
+#define PWM_DEVICE_ID   "ecap.0"
+
+static struct platform_pwm_backlight_data am335x_backlight_data = {
+	.pwm_id         = PWM_DEVICE_ID,
 	.ch             = -1,
 	.lth_brightness	= 21,
 	.max_brightness = AM335X_BACKLIGHT_MAX_BRIGHTNESS,
@@ -106,21 +188,19 @@ static struct platform_pwm_backlight_data am335x_backlight_data0 = {
 	.pwm_period_ns  = AM335X_PWM_PERIOD_NANO_SECONDS,
 };
 
-static struct platform_pwm_backlight_data am335x_backlight_data2 = {
-	.pwm_id         = "ecap.2",
-	.ch             = -1,
-	.lth_brightness	= 21,
-	.max_brightness = AM335X_BACKLIGHT_MAX_BRIGHTNESS,
-	.dft_brightness = AM335X_BACKLIGHT_DEFAULT_BRIGHTNESS,
-	.pwm_period_ns  = AM335X_PWM_PERIOD_NANO_SECONDS,
+static const struct display_panel bbtoys7_panel = {
+	WVGA,
+	16,
+	16,
+	COLOR_ACTIVE,
 };
 
 static struct lcd_ctrl_config lcd_cfg = {
-	&disp_panel,
+	&bbtoys7_panel,
 	.ac_bias		= 255,
 	.ac_bias_intrpt		= 0,
 	.dma_burst_sz		= 16,
-	.bpp			= 32,
+	.bpp			= 16,
 	.fdd			= 0x80,
 	.tft_alt_mode		= 0,
 	.stn_565_mode		= 0,
@@ -138,29 +218,116 @@ struct da8xx_lcdc_platform_data TFC_S9700RTWV35TR_01B_pdata = {
 	.type			= "TFC_S9700RTWV35TR_01B",
 };
 
-struct da8xx_lcdc_platform_data  NHD_480272MF_ATXI_pdata = {
-	.manu_name              = "NHD",
-	.controller_data        = &lcd_cfg,
-	.type                   = "NHD-4.3-ATXI#-T-1",
-};
-
 #include "common.h"
 
+#define BBTOYS7LCD_PWM_DEVICE_ID   "ehrpwm.1:0"
+
+static struct platform_pwm_backlight_data bbtoys7lcd_backlight_data = {
+	.pwm_id         = BBTOYS7LCD_PWM_DEVICE_ID,
+	.ch             = -1,
+	.max_brightness = AM335X_BACKLIGHT_MAX_BRIGHTNESS,
+	.dft_brightness = AM335X_BACKLIGHT_DEFAULT_BRIGHTNESS,
+	.pwm_period_ns  = AM335X_PWM_PERIOD_NANO_SECONDS,
+};
+
+static struct lcd_ctrl_config bbtoys7_cfg = {
+	&bbtoys7_panel,
+	.ac_bias		= 255,
+	.ac_bias_intrpt		= 0,
+	.dma_burst_sz		= 16,
+	.bpp			= 16,
+	.fdd			= 0x80,
+	.tft_alt_mode		= 0,
+	.stn_565_mode		= 0,
+	.mono_8bit_mode		= 0,
+	.invert_line_clock	= 1,
+	.invert_frm_clock	= 1,
+	.sync_edge		= 0,
+	.sync_ctrl		= 1,
+	.raster_order		= 0,
+};
+
+struct da8xx_lcdc_platform_data bbtoys7_pdata = {
+	.manu_name		= "ThreeFive",
+	.controller_data	= &bbtoys7_cfg,
+	.type			= "TFC_S9700RTWV35TR_01B",
+};
+
+static struct lcd_ctrl_config bbtoys35_cfg = {
+	&bbtoys7_panel,
+	.ac_bias		= 255,
+	.ac_bias_intrpt		= 0,
+	.dma_burst_sz		= 16,
+	.bpp			= 16,
+	.fdd			= 0x80,
+	.tft_alt_mode		= 0,
+	.stn_565_mode		= 0,
+	.mono_8bit_mode		= 0,
+	.invert_line_clock	= 1,
+	.invert_frm_clock	= 1,
+	.sync_edge		= 0,
+	.sync_ctrl		= 1,
+	.raster_order		= 0,
+};
+
+struct da8xx_lcdc_platform_data bbtoys35_pdata = {
+	.manu_name		= "BBToys",
+	.controller_data	= &bbtoys35_cfg,
+	.type			= "CDTech_S035Q01",
+};
+
+struct da8xx_lcdc_platform_data bbtoys43_pdata = {
+	.manu_name		= "BBToys",
+	.controller_data	= &lcd_cfg,
+	.type			= "NHD-4.3-ATXI#-T-1",
+};
+
+static const struct display_panel dvi_panel = {
+	WVGA,
+	16,
+	16,
+	COLOR_ACTIVE,
+};
+
+static struct lcd_ctrl_config dvi_cfg = {
+	&dvi_panel,
+	.ac_bias		= 255,
+	.ac_bias_intrpt		= 0,
+	.dma_burst_sz		= 16,
+	.bpp			= 16,
+	.fdd			= 0x80,
+	.tft_alt_mode		= 0,
+	.stn_565_mode		= 0,
+	.mono_8bit_mode		= 0,
+	.invert_line_clock	= 1,
+	.invert_frm_clock	= 1,
+	.sync_edge		= 0,
+	.sync_ctrl		= 1,
+	.raster_order		= 0,
+};
+
+struct da8xx_lcdc_platform_data dvi_pdata = {
+	.manu_name		= "BBToys",
+	.controller_data	= &dvi_cfg,
+	.type			= "1024x768@60",
+};
+
+/* TSc controller */
 #include <linux/lis3lv02d.h>
 
 /* TSc controller */
 static struct tsc_data am335x_touchscreen_data  = {
 	.wires  = 4,
 	.x_plate_resistance = 200,
-	.steps_to_configure = 5,
+	.mode = TI_TSCADC_TSCMODE,
 };
 
-static struct mfd_tscadc_board tscadc = {
-	.tsc_init = &am335x_touchscreen_data,
+static struct tsc_data bone_touchscreen_data  = {
+	.mode = TI_TSCADC_GENMODE,
 };
 
 static u8 am335x_iis_serializer_direction1[] = {
-	INACTIVE_MODE,	INACTIVE_MODE,	TX_MODE,	RX_MODE,
+	INACTIVE_MODE,	INACTIVE_MODE,	RX_MODE,	TX_MODE,
 	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,
 	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,
 	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,
@@ -179,23 +346,17 @@ static struct snd_platform_data am335x_evm_snd_data1 = {
 	.rxnumevt	= 1,
 };
 
-static u8 am335x_evm_sk_iis_serializer_direction1[] = {
-	INACTIVE_MODE,	INACTIVE_MODE,	TX_MODE,	INACTIVE_MODE,
-	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,
-	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,
-	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,	INACTIVE_MODE,
-};
-
-static struct snd_platform_data am335x_evm_sk_snd_data1 = {
-	.tx_dma_offset	= 0x46400000,	/* McASP1 */
-	/*.rx_dma_offset	= 0x46400000,*/
+static struct snd_platform_data bone_snd_data1 = {
+	.tx_dma_offset	= 0x46000000,	/* McASP0*/
+	.rx_dma_offset	= 0x46000000,
 	.op_mode	= DAVINCI_MCASP_IIS_MODE,
-	.num_serializer	= ARRAY_SIZE(am335x_evm_sk_iis_serializer_direction1),
+	.num_serializer	= ARRAY_SIZE(am335x_iis_serializer_direction1),
 	.tdm_slots	= 2,
-	.serial_dir	= am335x_evm_sk_iis_serializer_direction1,
+	.serial_dir	= am335x_iis_serializer_direction1,
 	.asp_chan_q	= EVENTQ_2,
 	.version	= MCASP_VERSION_3,
 	.txnumevt	= 1,
+	.rxnumevt	= 1,
 };
 
 static struct omap2_hsmmc_info am335x_mmc[] __initdata = {
@@ -218,16 +379,6 @@ static struct omap2_hsmmc_info am335x_mmc[] __initdata = {
 
 #ifdef CONFIG_OMAP_MUX
 static struct omap_board_mux board_mux[] __initdata = {
-	/*
-	 * Setting SYSBOOT[5] should set xdma_event_intr0 pin to mode 3 thereby
-	 * allowing clkout1 to be available on xdma_event_intr0.
-	 * However, on some boards (like EVM-SK), SYSBOOT[5] isn't properly
-	 * latched.
-	 * To be extra cautious, setup the pin-mux manually.
-	 * If any modules/usecase requries it in different mode, then subsequent
-	 * module init call will change the mux accordingly.
-	 */
-	AM33XX_MUX(XDMA_EVENT_INTR0, OMAP_MUX_MODE3 | AM33XX_PIN_OUTPUT),
 	AM33XX_MUX(I2C0_SDA, OMAP_MUX_MODE0 | AM33XX_SLEWCTRL_SLOW |
 			AM33XX_INPUT_EN | AM33XX_PIN_OUTPUT),
 	AM33XX_MUX(I2C0_SCL, OMAP_MUX_MODE0 | AM33XX_SLEWCTRL_SLOW |
@@ -280,10 +431,11 @@ static struct omap_board_config_kernel am335x_evm_config[] __initdata = {
 *  Header		4	0xAA, 0x55, 0x33, 0xEE
 *
 *  Board Name		8	Name for board in ASCII.
-*				Example "A33515BB" = "AM335x 15x15 Base Board"
+*				example "A33515BB" = "AM335X
+				Low Cost EVM board"
 *
-*  Version		4	Hardware version code for board	in ASCII.
-*				"1.0A" = rev.01.0A
+*  Version		4	Hardware version code for board in
+*				in ASCII. "1.0A" = rev.01.0A
 *
 *  Serial Number	12	Serial number of the board. This is a 12
 *				character string which is WWYY4P16nnnn, where
@@ -294,7 +446,8 @@ static struct omap_board_config_kernel am335x_evm_config[] __initdata = {
 *  Configuration option	32	Codes(TBD) to show the configuration
 *				setup on this board.
 *
-*  Available		32720	Available space for other non-volatile data.
+*  Available		32720	Available space for other non-volatile
+*				data.
 */
 struct am335x_evm_eeprom_config {
 	u32	header;
@@ -346,37 +499,47 @@ static struct am335x_evm_eeprom_config config;
 static struct am335x_eeprom_config1 config1;
 static bool daughter_brd_detected;
 
+struct beaglebone_cape_eeprom_config {
+	u32	header;
+	char  format_revision[2];
+	char	name[32];
+	char	version[4];
+	char	manufacturer[16];
+	char	partnumber[16];
+	u16  numpins;
+	char	serial[12];
+	u16	muxdata[74];
+	u16  current_3v3;
+	u16  current_vdd5v;
+	u16  current_sys5v;
+	u16  dc;
+};
+
+static struct beaglebone_cape_eeprom_config cape_config;
+static bool beaglebone_cape_detected;
+
+/* keep track of ADC pin usage */
+static int capecount = 0;
+static bool beaglebone_tsadcpins_free = 1;
+static bool beaglebone_leds_free = 1;
+static bool beaglebone_spi1_free = 1;
+static bool beaglebone_w1gpio_free = 1;
+static bool beaglebone_skip_mmc0_init = 0;
+
+#define GP_EVM_REV_IS_1_0		0x1
+#define GP_EVM_REV_IS_1_0A		0x1
+#define GP_EVM_REV_IS_1_1A		0x2
+#define GP_EVM_REV_IS_UNKNOWN		0xFF
+#define GP_EVM_ACTUALLY_BEAGLEBONE  0xBB
+static unsigned int gp_evm_revision = GP_EVM_REV_IS_UNKNOWN;
+
+unsigned int gigabit_enable = 1;
+
 #define EEPROM_MAC_ADDRESS_OFFSET	60 /* 4+8+4+12+32 */
 #define EEPROM_NO_OF_MAC_ADDR		3
 static char am335x_mac_addr[EEPROM_NO_OF_MAC_ADDR][ETH_ALEN];
 
 #define AM335X_EEPROM_HEADER		0xEE3355AA
-
-static int am33xx_evmid = -EINVAL;
-
-/*
-* am335x_evm_set_id - set up board evmid
-* @evmid - evm id which needs to be configured
-*
-* This function is called to configure board evm id.
-*/
-void am335x_evm_set_id(unsigned int evmid)
-{
-	am33xx_evmid = evmid;
-	return;
-}
-
-/*
-* am335x_evm_get_id - returns Board Type (EVM/BB/EVM-SK ...)
-*
-* Note:
-*	returns -EINVAL if Board detection hasn't happened yet.
-*/
-int am335x_evm_get_id(void)
-{
-	return am33xx_evmid;
-}
-EXPORT_SYMBOL(am335x_evm_get_id);
 
 /* current profile if exists else PROFILE_0 on error */
 static u32 am335x_get_profile_selection(void)
@@ -401,52 +564,151 @@ static struct pinmux_config haptics_pin_mux[] = {
 	{NULL, 0},
 };
 
+/* Module pin mux for battery cape */
+static struct pinmux_config batterycape_pin_mux[] = {
+	{"gpmc_a0.gpio1_16",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
+	{NULL, 0},
+};
+
+	
 /* Module pin mux for LCDC */
 static struct pinmux_config lcdc_pin_mux[] = {
+	{"gpmc_ad8.lcd_data23",		OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"gpmc_ad9.lcd_data22",		OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"gpmc_ad10.lcd_data21",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"gpmc_ad11.lcd_data20",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"gpmc_ad12.lcd_data19",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"gpmc_ad13.lcd_data18",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"gpmc_ad14.lcd_data17",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"gpmc_ad15.lcd_data16",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{NULL, 0},
+};
+
+
+static struct pinmux_config lcdc16_pin_mux[] = {
 	{"lcd_data0.lcd_data0",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data1.lcd_data1",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data2.lcd_data2",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data3.lcd_data3",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data4.lcd_data4",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data5.lcd_data5",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data6.lcd_data6",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data7.lcd_data7",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data8.lcd_data8",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data9.lcd_data9",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data10.lcd_data10",	OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data11.lcd_data11",	OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data12.lcd_data12",	OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data13.lcd_data13",	OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data14.lcd_data14",	OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
+        | AM33XX_PULL_DISA},
 	{"lcd_data15.lcd_data15",	OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT
-						       | AM33XX_PULL_DISA},
-	{"gpmc_ad8.lcd_data16",		OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
-	{"gpmc_ad9.lcd_data17",		OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
-	{"gpmc_ad10.lcd_data18",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
-	{"gpmc_ad11.lcd_data19",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
-	{"gpmc_ad12.lcd_data20",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
-	{"gpmc_ad13.lcd_data21",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
-	{"gpmc_ad14.lcd_data22",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
-	{"gpmc_ad15.lcd_data23",	OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+        | AM33XX_PULL_DISA},
 	{"lcd_vsync.lcd_vsync",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT},
 	{"lcd_hsync.lcd_hsync",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT},
 	{"lcd_pclk.lcd_pclk",		OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT},
 	{"lcd_ac_bias_en.lcd_ac_bias_en", OMAP_MUX_MODE0 | AM33XX_PIN_OUTPUT},
+	{NULL, 0},
+};
+
+
+/* Module pin mux for Beagleboardtoys DVI cape */
+static struct pinmux_config dvia1_pin_mux[] = {
+	{"gpmc_a2.gpio1_18", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR0 LED
+	{"gpmc_a3.gpio1_19", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR1 LED
+	{"gpmc_ad7.gpmc_ad7", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // DVI PDn
+	{NULL, 0},
+};
+
+static struct pinmux_config dvia2_pin_mux[] = {
+	{"gpmc_a2.gpio1_18", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR0 LED
+	{"gpmc_a3.gpio1_19", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR1 LED
+	{"gpmc_csn2.gpio1_31", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // DVI PDn
+	{NULL, 0},
+};
+
+/* Module pin mux for Beagleboardtoys 3.5" LCD cape */
+static struct pinmux_config bbtoys35_pin_mux[] = {
+	{"gpmc_a2.gpio1_18", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR0 LED
+	{NULL, 0},
+};
+
+/* Module pin mux for EHRPWM 1A */
+static struct pinmux_config ehrpwm1a_pin_mux[] = {
+	{"gpmc_a2.ehrpwm1A", OMAP_MUX_MODE6 | AM33XX_PIN_OUTPUT}, // Backlight
+	{NULL, 0},
+};
+
+/* Module pin mux for Beagleboardtoys 7" LCD cape */
+static struct pinmux_config bbtoys7_pin_mux[] = {
+	{"ecap0_in_pwm0_out.gpio0_7", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // AVDD_EN
+	{"gpmc_a2.ehrpwm1A", OMAP_MUX_MODE6 | AM33XX_PIN_OUTPUT}, // Backlight
+	{NULL, 0},
+};
+
+/* Module pin mux for Beagleboardtoys 7" LCD cape */
+static struct pinmux_config bbtoys7a2_pin_mux[] = {
+	{"gpmc_csn2.gpio1_31", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // AVDD_EN
+	{"gpmc_a2.ehrpwm1A", OMAP_MUX_MODE6 | AM33XX_PIN_OUTPUT}, // Backlight
+	{NULL, 0},
+};
+
+/* Module pin mux for Beagleboardtoys 7" LCD cape */
+static struct pinmux_config bbtoys7a3_pin_mux[] = {
+	{"spi0_sclk.gpio0_2", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // AVDD_EN
+	{"gpmc_a2.ehrpwm1A", OMAP_MUX_MODE6 | AM33XX_PIN_OUTPUT}, // Backlight
+	{NULL, 0},
+};
+
+/* Module pin mux for Beagleboardtoys 3" LCD cape */
+static struct pinmux_config bbtoys3_pin_mux[] = {
+	{"gpmc_a2.ehrpwm1A", OMAP_MUX_MODE6 | AM33XX_PIN_OUTPUT}, // Backlight
+	{NULL, 0},
+};
+
+/* Module pin mux for Beagleboardtoys 4" LCD Rev A1 cape */
+static struct pinmux_config bbtoys43a1_pin_mux[] = {
+	{"gpmc_a0.gpio1_16",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //left
+	{"gpmc_a1.gpio1_17",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //right
+	{"gpmc_a3.gpio1_19",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //up
+	{"mcasp0_axr0.gpio3_16",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //down
+	{"mcasp0_fsr.gpio3_19",    OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // DISEN
+	{"gpmc_ben1.gpio1_28",    OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // LED1
+	{"uart1_txd.gpio0_15", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // ENTER
+	{"uart1_rxd.gpio0_14", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // TSC_INT
+	{NULL, 0},
+};
+
+static struct pinmux_config w1_gpio_pin_mux[] = {
+	{"gpmc_ad3.gpio1_3",	OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
+	{NULL, 0},
+};
+
+static struct pinmux_config tsc_pin_mux[] = {
+	{"ain0.ain0",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"ain1.ain1",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"ain2.ain2",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"ain3.ain3",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"ain4.ain4",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"ain5.ain5",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"ain6.ain6",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"ain7.ain7",           OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"vrefp.vrefp",         OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
+	{"vrefn.vrefn",         OMAP_MUX_MODE0 | AM33XX_INPUT_EN},
 	{NULL, 0},
 };
 
@@ -577,11 +839,48 @@ static struct pinmux_config i2c1_pin_mux[] = {
 	{NULL, 0},
 };
 
+/* Pin mux for GPMC bus */
+static struct pinmux_config gpmc_pin_mux[] = {
+	{"gpmc_ad0.gpmc_ad0",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad1.gpmc_ad1",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad2.gpmc_ad2",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad3.gpmc_ad3",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad4.gpmc_ad4",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad5.gpmc_ad5",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad6.gpmc_ad6",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad7.gpmc_ad7",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad8.gpmc_ad8",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad9.gpmc_ad9",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad10.gpmc_ad10",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad11.gpmc_ad11",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad12.gpmc_ad12",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad13.gpmc_ad13",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad14.gpmc_ad14",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad15.gpmc_ad15",	  OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_wait0.gpmc_wait0", OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_wpn.gpmc_wpn",	  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_csn1.gpmc_csn1",	  OMAP_MUX_MODE0 | AM33XX_PULL_DISA},
+	{"gpmc_advn_ale.gpmc_advn_ale",  OMAP_MUX_MODE0 | AM33XX_PULL_DISA},
+	{"gpmc_oen_ren.gpmc_oen_ren",	 OMAP_MUX_MODE0 | AM33XX_PULL_DISA},
+	{"gpmc_wen.gpmc_wen",     OMAP_MUX_MODE0 | AM33XX_PULL_DISA},
+	{"gpmc_ben0_cle.gpmc_ben0_cle",	 OMAP_MUX_MODE0 | AM33XX_PULL_DISA},
+	{"gpmc_clk.gpmc_clk",	 OMAP_MUX_MODE0 | AM33XX_PIN_INPUT},
+	{"ecap0_in_pwm0_out.xdma_event_intr2", OMAP_MUX_MODE6 | AM33XX_PIN_INPUT}, // DMAREQ
+	{NULL, 0},
+};
+
+static struct pinmux_config camera_cape_pin_mux[] = {
+	{"spi0_d1.gpio0_4",    OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT },		// QL CSSP and Camera Sensor Reset
+	{"spi0_cs0.gpio0_5",   OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT_PULLUP },	// 1V8 and 2V8 Power Enable
+	{"gpmc_wait0.gpio0_30", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},		// Sensor orientation detect: low -> frontfacing, high -> backfacing
+	{NULL, 0},
+};
+
 static struct pinmux_config i2c2_pin_mux[] = {
 	{"uart1_ctsn.i2c2_sda",    OMAP_MUX_MODE3 | AM33XX_SLEWCTRL_SLOW |
-					AM33XX_PULL_UP | AM33XX_INPUT_EN},
+					AM33XX_PIN_INPUT_PULLUP},
 	{"uart1_rtsn.i2c2_scl",   OMAP_MUX_MODE3 | AM33XX_SLEWCTRL_SLOW |
-					AM33XX_PULL_UP | AM33XX_INPUT_EN},
+					AM33XX_PIN_INPUT_PULLUP},
 	{NULL, 0},
 };
 
@@ -590,59 +889,58 @@ static struct pinmux_config mcasp1_pin_mux[] = {
 	{"mii1_crs.mcasp1_aclkx", OMAP_MUX_MODE4 | AM33XX_PIN_INPUT_PULLDOWN},
 	{"mii1_rxerr.mcasp1_fsx", OMAP_MUX_MODE4 | AM33XX_PIN_INPUT_PULLDOWN},
 	{"mii1_col.mcasp1_axr2", OMAP_MUX_MODE4 | AM33XX_PIN_INPUT_PULLDOWN},
-	{"rmii1_refclk.mcasp1_axr3", OMAP_MUX_MODE4 |
-						AM33XX_PIN_INPUT_PULLDOWN},
+	{"rmii1_refclk.mcasp1_axr3", OMAP_MUX_MODE4 | AM33XX_PIN_INPUT_PULLDOWN},
 	{NULL, 0},
 };
 
+/* Module pin mux for mcasp0 */
+static struct pinmux_config mcasp0_pin_mux[] = {
+	{"mcasp0_aclkx.mcasp0_aclkx", OMAP_MUX_MODE0 |AM33XX_PIN_INPUT_PULLDOWN},
+	{"mcasp0_fsx.mcasp0_fsx", OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLDOWN},
+	{"mcasp0_ahclkr.mcasp0_axr2", OMAP_MUX_MODE2 | AM33XX_PIN_INPUT_PULLDOWN},
+	{"mcasp0_ahclkx.mcasp0_axr3", OMAP_MUX_MODE2 | AM33XX_PIN_INPUT_PULLDOWN},
+	{NULL, 0},
+};
 
 /* Module pin mux for mmc0 */
-static struct pinmux_config mmc0_common_pin_mux[] = {
+static struct pinmux_config mmc0_pin_mux[] = {
 	{"mmc0_dat3.mmc0_dat3",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
 	{"mmc0_dat2.mmc0_dat2",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
 	{"mmc0_dat1.mmc0_dat1",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
 	{"mmc0_dat0.mmc0_dat0",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
 	{"mmc0_clk.mmc0_clk",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
 	{"mmc0_cmd.mmc0_cmd",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"mcasp0_aclkr.mmc0_sdwp", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
+	{"spi0_cs1.mmc0_sdcd",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
 	{NULL, 0},
 };
 
-static struct pinmux_config mmc0_wp_only_pin_mux[] = {
-	{"mcasp0_aclkr.gpio3_18", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
-	{NULL, 0},
-};
-
-static struct pinmux_config mmc0_cd_only_pin_mux[] = {
-	{"spi0_cs1.gpio0_6",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
+static struct pinmux_config mmc0_no_cd_pin_mux[] = {
+	{"mmc0_dat3.mmc0_dat3",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"mmc0_dat2.mmc0_dat2",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"mmc0_dat1.mmc0_dat1",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"mmc0_dat0.mmc0_dat0",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"mmc0_clk.mmc0_clk",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"mmc0_cmd.mmc0_cmd",	OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{"mcasp0_aclkr.mmc0_sdwp", OMAP_MUX_MODE4 | AM33XX_PIN_INPUT_PULLDOWN},
 	{NULL, 0},
 };
 
 /* Module pin mux for mmc1 */
-static struct pinmux_config mmc1_common_pin_mux[] = {
+static struct pinmux_config mmc1_pin_mux[] = {
+	{"gpmc_ad7.mmc1_dat7",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad6.mmc1_dat6",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad5.mmc1_dat5",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_ad4.mmc1_dat4",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
 	{"gpmc_ad3.mmc1_dat3",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
 	{"gpmc_ad2.mmc1_dat2",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
 	{"gpmc_ad1.mmc1_dat1",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
 	{"gpmc_ad0.mmc1_dat0",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
 	{"gpmc_csn1.mmc1_clk",	OMAP_MUX_MODE2 | AM33XX_PIN_INPUT_PULLUP},
 	{"gpmc_csn2.mmc1_cmd",	OMAP_MUX_MODE2 | AM33XX_PIN_INPUT_PULLUP},
-	{NULL, 0},
-};
-
-static struct pinmux_config mmc1_dat4_7_pin_mux[] = {
-	{"gpmc_ad7.mmc1_dat7",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
-	{"gpmc_ad6.mmc1_dat6",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
-	{"gpmc_ad5.mmc1_dat5",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
-	{"gpmc_ad4.mmc1_dat4",	OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
-	{NULL, 0},
-};
-
-static struct pinmux_config mmc1_wp_only_pin_mux[] = {
 	{"gpmc_csn0.gpio1_29",	OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
-	{NULL, 0},
-};
-
-static struct pinmux_config mmc1_cd_only_pin_mux[] = {
-	{"gpmc_advn_ale.gpio2_2", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
+	{"gpmc_advn_ale.mmc1_sdcd", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
+	{"uart1_rxd.mmc1_sdwp", OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLDOWN},
 	{NULL, 0},
 };
 
@@ -665,38 +963,34 @@ static struct pinmux_config d_can_ia_pin_mux[] = {
 	{NULL, 0},
 };
 
+static struct pinmux_config tt3201_pin_mux[] = {
+	{"uart1_rxd.d_can1_tx", OMAP_MUX_MODE2 | AM33XX_PIN_OUTPUT },
+	{"uart1_txd.d_can1_rx", OMAP_MUX_MODE2 | AM33XX_PIN_INPUT_PULLUP },
+	{"mcasp0_fsr.gpio3_19", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP },
+	{"mcasp0_ahclkx.gpio3_21", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP },
+	{"ecap0_in_pwm0_out.spi1_cs1", OMAP_MUX_MODE2 | AM33XX_PIN_OUTPUT_PULLUP },
+	{NULL, 0},
+};
+
+static struct pinmux_config uart1dcan1_pin_mux[] = {
+	{"uart1_rxd.d_can1_tx", OMAP_MUX_MODE2 | AM33XX_PIN_OUTPUT },
+	{"uart1_txd.d_can1_rx", OMAP_MUX_MODE2 | AM33XX_PIN_INPUT_PULLUP },
+	{NULL, 0},
+};
+
+static struct pinmux_config uart1_pin_mux[] = {
+	{"uart1_txd.uart1_txd", OMAP_MUX_MODE0 | AM33XX_PULL_ENBL},
+	{"uart1_rxd.uart1_rxd", OMAP_MUX_MODE0 | AM33XX_PIN_INPUT_PULLUP},
+	{NULL, 0},
+};
+
 /* Module pin mux for uart2 */
 static struct pinmux_config uart2_pin_mux[] = {
-	{"spi0_sclk.uart2_rxd", OMAP_MUX_MODE1 | AM33XX_SLEWCTRL_SLOW |
-						AM33XX_PIN_INPUT_PULLUP},
-	{"spi0_d0.uart2_txd", OMAP_MUX_MODE1 | AM33XX_PULL_UP |
-						AM33XX_PULL_DISA |
-						AM33XX_SLEWCTRL_SLOW},
+	{"spi0_d0.uart2_txd", OMAP_MUX_MODE1 | AM33XX_PIN_OUTPUT},
+	{"spi0_sclk.uart2_rxd", OMAP_MUX_MODE1 | AM33XX_PIN_INPUT_PULLUP},
 	{NULL, 0},
 };
 
-/* pinmux for gpio based key */
-static struct pinmux_config gpio_keys_pin_mux[] = {
-	{"gpmc_wait0.gpio0_30", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"gpmc_oen_ren.gpio2_3", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"gpmc_advn_ale.gpio2_2", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"gpmc_ben0_cle.gpio2_5", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{NULL, 0},
-};
-
-/* pinmux for led device */
-static struct pinmux_config gpio_led_mux[] = {
-	{"gpmc_ad4.gpio1_4", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"gpmc_ad5.gpio1_5", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"gpmc_ad6.gpio1_6", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"gpmc_ad7.gpio1_7", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{NULL, 0},
-};
-
-static struct pinmux_config gpio_ddr_vtt_enb_pin_mux[] = {
-	{"ecap0_in_pwm0_out.gpio0_7", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT},
-	{NULL, 0},
-};
 
 /*
 * @pin_mux - single module pin-mux structure which defines pin-mux
@@ -828,6 +1122,416 @@ static void volume_keys_init(int evm_id, int profile)
 		pr_err("failed to register matrix keypad (2x3) device\n");
 }
 
+/* pinmux for lcd7 keys */
+static struct pinmux_config lcd7_keys_pin_mux[] = {
+	{"gpmc_a0.gpio1_16",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //left
+	{"gpmc_a1.gpio1_17",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //right
+	{"gpmc_a3.gpio1_19",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //up
+	{"mcasp0_axr0.gpio3_16",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //down
+	{"mcasp0_fsr.gpio3_19",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //enter
+	{NULL, 0},
+};
+
+/* Configure GPIOs for lcd7 keys */
+static struct gpio_keys_button beaglebone_lcd7_gpio_keys[] = {
+	{
+		.code                   = KEY_LEFT,
+		.gpio                   = GPIO_TO_PIN(1, 16),
+		.active_low             = true,
+		.desc                   = "left",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_RIGHT,
+		.gpio                   = GPIO_TO_PIN(1, 17),
+		.active_low             = true,
+		.desc                   = "right",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_UP,
+		.gpio                   = GPIO_TO_PIN(1, 19),
+		.active_low             = true,
+		.desc                   = "up",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_DOWN,
+		.gpio                   = GPIO_TO_PIN(3, 16),
+		.active_low             = true,
+		.desc                   = "down",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_ENTER,
+		.gpio                   = GPIO_TO_PIN(3, 19),
+		.active_low             = true,
+		.desc                   = "enter",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+};
+
+static struct gpio_keys_platform_data beaglebone_lcd7_gpio_key_info = {
+	.buttons        = beaglebone_lcd7_gpio_keys,
+	.nbuttons       = ARRAY_SIZE(beaglebone_lcd7_gpio_keys),
+};
+
+static struct platform_device beaglebone_lcd7_keys = {
+	.name   = "gpio-keys",
+	.id     = -1,
+	.dev    = {
+		.platform_data  = &beaglebone_lcd7_gpio_key_info,
+	},
+};
+
+static void beaglebone_lcd7_keys_init(int evm_id, int profile)
+{
+	int err;
+	setup_pin_mux(lcd7_keys_pin_mux);
+	err = platform_device_register(&beaglebone_lcd7_keys);
+	if (err)
+		pr_err("failed to register gpio keys for LCD7 cape\n");
+}
+
+/* pinmux for lcd7 keys */
+static struct pinmux_config lcd7a3_keys_pin_mux[] = {
+	{"gpmc_a0.gpio1_16",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //left
+	{"gpmc_a1.gpio1_17",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //right
+	{"gpmc_a3.gpio1_19",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //up
+	{"mcasp0_axr0.gpio3_16",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //down
+	{"sdpi0_d0.gpio0_3",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //enter
+	{NULL, 0},
+};
+
+/* Configure GPIOs for lcd7 keys */
+static struct gpio_keys_button beaglebone_lcd7a3_gpio_keys[] = {
+	{
+		.code                   = KEY_LEFT,
+		.gpio                   = GPIO_TO_PIN(1, 16),
+		.active_low             = true,
+		.desc                   = "left",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_RIGHT,
+		.gpio                   = GPIO_TO_PIN(1, 17),
+		.active_low             = true,
+		.desc                   = "right",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_UP,
+		.gpio                   = GPIO_TO_PIN(1, 19),
+		.active_low             = true,
+		.desc                   = "up",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_DOWN,
+		.gpio                   = GPIO_TO_PIN(3, 16),
+		.active_low             = true,
+		.desc                   = "down",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_ENTER,
+		.gpio                   = GPIO_TO_PIN(0, 3),
+		.active_low             = true,
+		.desc                   = "enter",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+};
+
+static struct gpio_keys_platform_data beaglebone_lcd7a3_gpio_key_info = {
+	.buttons        = beaglebone_lcd7a3_gpio_keys,
+	.nbuttons       = ARRAY_SIZE(beaglebone_lcd7a3_gpio_keys),
+};
+
+static struct platform_device beaglebone_lcd7a3_keys = {
+	.name   = "gpio-keys",
+	.id     = -1,
+	.dev    = {
+		.platform_data  = &beaglebone_lcd7a3_gpio_key_info,
+	},
+};
+
+static void beaglebone_lcd7a3_keys_init(int evm_id, int profile)
+{
+	int err;
+	setup_pin_mux(lcd7a3_keys_pin_mux);
+	err = platform_device_register(&beaglebone_lcd7a3_keys);
+	if (err)
+		pr_err("failed to register gpio keys for LCD7 cape\n");
+}
+
+/* pinmux for lcd3 keys */
+static struct pinmux_config lcd3_keys_pin_mux[] = {
+	{"gpmc_a0.gpio1_16",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
+	{"gpmc_a1.gpio1_17",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
+	{"mcasp0_fsr.gpio3_19",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
+	{"gpmc_ben1.gpio1_28",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
+	{"ecap0_in_pwm0_out.gpio0_7",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
+	{NULL, 0},
+};
+
+/* Configure GPIOs for lcd3 rev A or earlier keys */
+static struct gpio_keys_button beaglebone_lcd3_gpio_keys[] = {
+	{
+		.code                   = KEY_LEFT,
+		.gpio                   = GPIO_TO_PIN(1, 16),
+		.active_low             = true,
+		.desc                   = "left",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_RIGHT,
+		.gpio                   = GPIO_TO_PIN(1, 17),
+		.active_low             = true,
+		.desc                   = "right",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_UP,
+		.gpio                   = GPIO_TO_PIN(3, 19),
+		.active_low             = true,
+		.desc                   = "up",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_DOWN,
+		.gpio                   = GPIO_TO_PIN(1, 28),
+		.active_low             = true,
+		.desc                   = "down",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_ENTER,
+		.gpio                   = GPIO_TO_PIN(0, 7),
+		.active_low             = true,
+		.desc                   = "down",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+};
+
+static struct gpio_keys_platform_data beaglebone_lcd3_gpio_key_info = {
+	.buttons        = beaglebone_lcd3_gpio_keys,
+	.nbuttons       = ARRAY_SIZE(beaglebone_lcd3_gpio_keys),
+};
+
+static struct platform_device beaglebone_lcd3_keys = {
+	.name   = "gpio-keys",
+	.id     = -1,
+	.dev    = {
+		.platform_data  = &beaglebone_lcd3_gpio_key_info,
+	},
+};
+
+/* pinmux for lcd3 A1 or newer keys */
+static struct pinmux_config lcd3a1_keys_pin_mux[] = {
+	{"gpmc_a0.gpio1_16",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // Left
+	{"gpmc_a1.gpio1_17",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //Right
+	{"gpmc_a3.gpio1_19", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // Up
+	{"mcasp0_axr0.gpio3_16",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //Down
+	{"mcasp0_fsr.gpio3_19",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // Enter
+	{NULL, 0},
+};
+
+/* Configure GPIOs for lcd3 rev A1 or newer keys */
+static struct gpio_keys_button lcd3a1_gpio_keys[] = {
+	{
+		.code                   = KEY_LEFT,
+		.gpio                   = GPIO_TO_PIN(1, 16),
+		.active_low             = true,
+		.desc                   = "left",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_RIGHT,
+		.gpio                   = GPIO_TO_PIN(1, 17),
+		.active_low             = true,
+		.desc                   = "right",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_UP,
+		.gpio                   = GPIO_TO_PIN(1, 19),
+		.active_low             = true,
+		.desc                   = "up",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_DOWN,
+		.gpio                   = GPIO_TO_PIN(3, 16),
+		.active_low             = true,
+		.desc                   = "down",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_ENTER,
+		.gpio                   = GPIO_TO_PIN(3, 19),
+		.active_low             = true,
+		.desc                   = "enter",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+};
+
+static struct gpio_keys_platform_data lcd3a1_gpio_key_info = {
+	.buttons        = lcd3a1_gpio_keys,
+	.nbuttons       = ARRAY_SIZE(lcd3a1_gpio_keys),
+};
+
+static struct platform_device lcd3a1_keys = {
+	.name   = "gpio-keys",
+	.id     = -1,
+	.dev    = {
+		.platform_data  = &lcd3a1_gpio_key_info,
+	},
+};
+
+/* pinmux for lcd3 A2 or newer keys */
+static struct pinmux_config lcd3a2_keys_pin_mux[] = {
+	{"gpmc_a0.gpio1_16",  OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // Left
+	{"gpmc_a1.gpio1_17",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //Right
+	{"gpmc_a3.gpio1_19", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // Up
+	{"mcasp0_axr0.gpio3_16",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, //Down
+	{"spi0_d0.gpio0_3",    OMAP_MUX_MODE7 | AM33XX_PIN_INPUT}, // Enter
+	{NULL, 0},
+};
+
+/* Configure GPIOs for lcd3 rev A2 or newer keys */
+static struct gpio_keys_button lcd3a2_gpio_keys[] = {
+	{
+		.code                   = KEY_LEFT,
+		.gpio                   = GPIO_TO_PIN(1, 16),
+		.active_low             = true,
+		.desc                   = "left",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_RIGHT,
+		.gpio                   = GPIO_TO_PIN(1, 17),
+		.active_low             = true,
+		.desc                   = "right",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_UP,
+		.gpio                   = GPIO_TO_PIN(1, 19),
+		.active_low             = true,
+		.desc                   = "up",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_DOWN,
+		.gpio                   = GPIO_TO_PIN(3, 16),
+		.active_low             = true,
+		.desc                   = "down",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_ENTER,
+		.gpio                   = GPIO_TO_PIN(0, 3),
+		.active_low             = true,
+		.desc                   = "enter",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+};
+
+static struct gpio_keys_platform_data lcd3a2_gpio_key_info = {
+	.buttons        = lcd3a2_gpio_keys,
+	.nbuttons       = ARRAY_SIZE(lcd3a2_gpio_keys),
+};
+
+static struct platform_device lcd3a2_keys = {
+	.name   = "gpio-keys",
+	.id     = -1,
+	.dev    = {
+		.platform_data  = &lcd3a2_gpio_key_info,
+	},
+};
+
+/* Configure GPIOs for lcd43 keys */
+static struct gpio_keys_button beaglebone_lcd43_gpio_keys[] = {
+	{
+		.code                   = KEY_LEFT,
+		.gpio                   = GPIO_TO_PIN(1, 16),
+		.active_low             = true,
+		.desc                   = "left",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_RIGHT,
+		.gpio                   = GPIO_TO_PIN(1, 17),
+		.active_low             = true,
+		.desc                   = "right",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_UP,
+		.gpio                   = GPIO_TO_PIN(1, 19),
+		.active_low             = true,
+		.desc                   = "up",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_DOWN,
+		.gpio                   = GPIO_TO_PIN(3, 16),
+		.active_low             = true,
+		.desc                   = "down",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+	{
+		.code                   = KEY_ENTER,
+		.gpio                   = GPIO_TO_PIN(0, 15),
+		.active_low             = true,
+		.desc                   = "enter",
+		.type                   = EV_KEY,
+		.wakeup                 = 1,
+	},
+};
+
+static struct gpio_keys_platform_data beaglebone_lcd43_gpio_key_info = {
+	.buttons        = beaglebone_lcd43_gpio_keys,
+	.nbuttons       = ARRAY_SIZE(beaglebone_lcd43_gpio_keys),
+};
+
+static struct platform_device beaglebone_lcd43_keys = {
+	.name   = "gpio-keys",
+	.id     = -1,
+	.dev    = {
+		.platform_data  = &beaglebone_lcd43_gpio_key_info,
+	},
+};
+
 /*
 * @evm_id - evm id which needs to be configured
 * @dev_cfg - single evm structure which includes
@@ -839,8 +1543,6 @@ static void _configure_device(int evm_id, struct evm_dev_cfg *dev_cfg,
 	int profile)
 {
 	int i;
-
-	am335x_evm_set_id(evm_id);
 
 	/*
 	* Only General Purpose & Industrial Auto Motro Control
@@ -892,6 +1594,241 @@ static struct pinmux_config profibus_pin_mux[] = {
 	{NULL, 0},
 };
 
+#define BEAGLEBONE_W1_GPIO GPIO_TO_PIN(1, 3)
+
+static struct w1_gpio_platform_data bone_w1_gpio_pdata = {
+	.pin		= BEAGLEBONE_W1_GPIO,
+	.is_open_drain	= 0,
+};
+
+static struct platform_device bone_w1_device = {
+	.name			= "w1-gpio",
+	.id			= -1,
+	.dev.platform_data	= &bone_w1_gpio_pdata,
+};
+
+/* LEDS - gpio1_21 -> gpio1_24 */
+
+#define BEAGLEBONE_USR1_LED  GPIO_TO_PIN(1, 21)
+#define BEAGLEBONE_USR2_LED  GPIO_TO_PIN(1, 22)
+#define BEAGLEBONE_USR3_LED  GPIO_TO_PIN(1, 23)
+#define BEAGLEBONE_USR4_LED  GPIO_TO_PIN(1, 24)
+
+static struct gpio_led bone_gpio_leds[] = {
+	{
+		.name			= "beaglebone::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONE_USR1_LED,
+	},
+	{
+		.name			= "beaglebone::usr1",
+		.default_trigger	= "mmc0",
+		.gpio			= BEAGLEBONE_USR2_LED,
+	},
+	{
+		.name			= "beaglebone::usr2",
+		.gpio			= BEAGLEBONE_USR3_LED,
+	},
+	{
+		.name           = "beaglebone::usr3",
+		.gpio           = BEAGLEBONE_USR4_LED,
+	},
+};
+
+static struct gpio_led_platform_data bone_gpio_led_info = {
+	.leds		= bone_gpio_leds,
+	.num_leds	= ARRAY_SIZE(bone_gpio_leds),
+};
+
+static struct platform_device bone_leds_gpio = {
+	.name	= "leds-gpio",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &bone_gpio_led_info,
+	},
+};
+
+
+#define BEAGLEBONEDVI_USR0_LED  GPIO_TO_PIN(1, 18)
+#define BEAGLEBONEDVI_USR1_LED  GPIO_TO_PIN(1, 19)
+
+static struct gpio_led dvi_gpio_leds[] = {
+	{
+		.name			= "beaglebone::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONE_USR1_LED,
+	},
+	{
+		.name			= "beaglebone::usr1",
+		.default_trigger	= "mmc0",
+		.gpio			= BEAGLEBONE_USR2_LED,
+	},
+	{
+		.name			= "beaglebone::usr2",
+		.gpio			= BEAGLEBONE_USR3_LED,
+	},
+	{
+		.name           = "beaglebone::usr3",
+		.gpio           = BEAGLEBONE_USR4_LED,
+	},
+	{
+		.name			= "dvi::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONEDVI_USR0_LED,
+	},
+	{
+		.name			= "dvi::usr1",
+		.default_trigger	= "mmc0",
+		.gpio			= BEAGLEBONEDVI_USR1_LED,
+	},
+};
+
+static struct gpio_led_platform_data dvi_gpio_led_info = {
+	.leds		= dvi_gpio_leds,
+	.num_leds	= ARRAY_SIZE(dvi_gpio_leds),
+};
+
+static struct platform_device dvi_leds_gpio = {
+	.name	= "leds-gpio",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &dvi_gpio_led_info,
+	},
+};
+
+#define BEAGLEBONELCD3_USR0_LED  GPIO_TO_PIN(1, 18)
+
+static struct gpio_led lcd3_gpio_leds[] = {
+	{
+		.name			= "beaglebone::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONE_USR1_LED,
+	},
+	{
+		.name			= "beaglebone::usr1",
+		.default_trigger	= "mmc0",
+		.gpio			= BEAGLEBONE_USR2_LED,
+	},
+	{
+		.name			= "beaglebone::usr2",
+		.gpio			= BEAGLEBONE_USR3_LED,
+	},
+	{
+		.name           = "beaglebone::usr3",
+		.gpio           = BEAGLEBONE_USR4_LED,
+	},
+	{
+		.name			= "lcd3::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONELCD3_USR0_LED,
+	},
+};
+
+static struct gpio_led_platform_data lcd3_gpio_led_info = {
+	.leds		= lcd3_gpio_leds,
+	.num_leds	= ARRAY_SIZE(lcd3_gpio_leds),
+};
+
+static struct platform_device lcd3_leds_gpio = {
+	.name	= "leds-gpio",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &lcd3_gpio_led_info,
+	},
+};
+
+#define BEAGLEBONELCD3A2_USR0_LED  GPIO_TO_PIN(3, 19)
+
+static struct gpio_led lcd3a2_gpio_leds[] = {
+	{
+		.name			= "beaglebone::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONE_USR1_LED,
+	},
+	{
+		.name			= "beaglebone::usr1",
+		.default_trigger	= "mmc0",
+		.gpio			= BEAGLEBONE_USR2_LED,
+	},
+	{
+		.name			= "beaglebone::usr2",
+		.gpio			= BEAGLEBONE_USR3_LED,
+	},
+	{
+		.name           = "beaglebone::usr3",
+		.gpio           = BEAGLEBONE_USR4_LED,
+	},
+	{
+		.name			= "lcd3::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONELCD3A2_USR0_LED,
+	},
+};
+
+static struct gpio_led_platform_data lcd3a2_gpio_led_info = {
+	.leds		= lcd3a2_gpio_leds,
+	.num_leds	= ARRAY_SIZE(lcd3a2_gpio_leds),
+};
+
+static struct platform_device lcd3a2_leds_gpio = {
+	.name	= "leds-gpio",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &lcd3a2_gpio_led_info,
+	},
+};
+#define BEAGLEBONELCD7_USR_LED  GPIO_TO_PIN(1, 28)
+
+static struct gpio_led lcd7_gpio_leds[] = {
+	{
+		.name			= "beaglebone::usr0",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONE_USR1_LED,
+	},
+	{
+		.name			= "beaglebone::usr1",
+		.default_trigger	= "mmc0",
+		.gpio			= BEAGLEBONE_USR2_LED,
+	},
+	{
+		.name			= "beaglebone::usr2",
+		.gpio			= BEAGLEBONE_USR3_LED,
+	},
+	{
+		.name           = "beaglebone::usr3",
+		.gpio           = BEAGLEBONE_USR4_LED,
+	},
+	{
+		.name			= "lcd::usr",
+		.default_trigger	= "heartbeat",
+		.gpio			= BEAGLEBONELCD7_USR_LED,
+	},
+};
+
+static struct gpio_led_platform_data lcd7_gpio_led_info = {
+	.leds		= lcd7_gpio_leds,
+	.num_leds	= ARRAY_SIZE(lcd7_gpio_leds),
+};
+
+static struct platform_device lcd7_leds_gpio = {
+	.name	= "leds-gpio",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &lcd7_gpio_led_info,
+	},
+};
+
+static struct pinmux_config bone_pin_mux[] = {
+	/* User LED gpios (gpio1_21 to gpio1_24) */
+    {"gpmc_a5.rgmii2_td0", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR0
+    {"gpmc_a6.rgmii2_tclk", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR1
+    {"gpmc_a7.rgmii2_rclk", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR2
+    {"gpmc_a8.rgmii2_rd3", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT}, // USR3
+    /* Grounding gpio1_6 (pin 3 Conn A) signals bone tester to start diag tests */
+    {"gpmc_ad6.gpio1_6", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT_PULLUP},
+	{NULL, 0},
+};
+
 /* Module pin mux for eCAP0 */
 static struct pinmux_config ecap0_pin_mux[] = {
 	{"ecap0_in_pwm0_out.ecap0_in_pwm0_out",
@@ -899,21 +1836,15 @@ static struct pinmux_config ecap0_pin_mux[] = {
 	{NULL, 0},
 };
 
-/* Module pin mux for eCAP */
-static struct pinmux_config ecap2_pin_mux[] = {
-	{"mcasp0_ahclkr.ecap2_in_pwm2_out", AM33XX_PIN_OUTPUT},
-	{NULL, 0},
-};
+static int ehrpwm_backlight_enable;
+static int backlight_enable;
 
 #define AM335XEVM_WLAN_PMENA_GPIO	GPIO_TO_PIN(1, 30)
 #define AM335XEVM_WLAN_IRQ_GPIO		GPIO_TO_PIN(3, 17)
-#define AM335XEVM_SK_WLAN_IRQ_GPIO      GPIO_TO_PIN(1, 29)
 
 struct wl12xx_platform_data am335xevm_wlan_data = {
 	.irq = OMAP_GPIO_IRQ(AM335XEVM_WLAN_IRQ_GPIO),
 	.board_ref_clock = WL12XX_REFCLOCK_38_XTAL, /* 38.4Mhz */
-	.bt_enable_gpio = GPIO_TO_PIN(3, 21),
-	.wlan_enable_gpio = GPIO_TO_PIN(1, 16),
 };
 
 /* Module pin mux for wlan and bluetooth */
@@ -935,21 +1866,19 @@ static struct pinmux_config uart1_wl12xx_pin_mux[] = {
 	{NULL, 0},
 };
 
-static struct pinmux_config wl12xx_pin_mux[] = {
+static struct pinmux_config wl12xx_pin_mux_evm_rev1_1a[] = {
 	{"gpmc_a0.gpio1_16", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT},
 	{"mcasp0_ahclkr.gpio3_17", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"mcasp0_ahclkx.gpio3_21", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT_PULLUP},
+	{"mcasp0_ahclkx.gpio3_21", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT},
 	{NULL, 0},
  };
 
-static struct pinmux_config wl12xx_pin_mux_sk[] = {
-	{"gpmc_wpn.gpio0_31", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT},
-	{"gpmc_csn0.gpio1_29", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
-	{"mcasp0_ahclkx.gpio3_21", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT},
+static struct pinmux_config wl12xx_pin_mux_evm_rev1_0[] = {
+	{"gpmc_csn1.gpio1_30", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT},
+	{"mcasp0_ahclkr.gpio3_17", OMAP_MUX_MODE7 | AM33XX_PIN_INPUT},
+	{"gpmc_csn2.gpio1_31", OMAP_MUX_MODE7 | AM33XX_PIN_OUTPUT},
 	{NULL, 0},
-};
-
-static bool backlight_enable;
+ };
 
 static void enable_ecap0(int evm_id, int profile)
 {
@@ -957,19 +1886,13 @@ static void enable_ecap0(int evm_id, int profile)
 	setup_pin_mux(ecap0_pin_mux);
 }
 
-static void enable_ecap2(int evm_id, int profile)
-{
-	backlight_enable = true;
-	setup_pin_mux(ecap2_pin_mux);
-}
-
 /* Setup pwm-backlight */
 static struct platform_device am335x_backlight = {
 	.name           = "pwm-backlight",
 	.id             = -1,
-	.dev		= {
-		.platform_data = &am335x_backlight_data0,
-	},
+	.dev            = {
+		.platform_data  = &am335x_backlight_data,
+	}
 };
 
 static struct pwmss_platform_data  pwm_pdata[3] = {
@@ -984,40 +1907,55 @@ static struct pwmss_platform_data  pwm_pdata[3] = {
 	},
 };
 
-static int __init backlight_init(void)
+static void register_all_pwms(void)
+{
+	am33xx_register_ehrpwm(0, &pwm_pdata[0]);
+	am33xx_register_ehrpwm(1, &pwm_pdata[1]);
+	am33xx_register_ehrpwm(2, &pwm_pdata[2]);
+	am33xx_register_ecap(0, &pwm_pdata[0]);
+	am33xx_register_ecap(1, &pwm_pdata[1]);
+	am33xx_register_ecap(2, &pwm_pdata[2]);
+}
+
+static int __init ecap0_init(void)
 {
 	int status = 0;
 
 	if (backlight_enable) {
-		int ecap_index = 0;
-
-		switch (am335x_evm_get_id()) {
-		case GEN_PURP_EVM:
-		case GEN_PURP_DDR3_EVM:
-			ecap_index = 0;
-			break;
-		case EVM_SK:
-			/*
-			 * Invert polarity of PWM wave from ECAP to handle
-			 * backlight intensity to pwm brightness
-			 */
-			ecap_index = 2;
-			pwm_pdata[ecap_index].chan_attrib[0].inverse_pol = true;
-			am335x_backlight.dev.platform_data =
-				&am335x_backlight_data2;
-			break;
-		default:
-			pr_err("%s: Error on attempting to enable backlight,"
-				" not supported\n", __func__);
-			return -EINVAL;
-		}
-
-		am33xx_register_ecap(ecap_index, &pwm_pdata[ecap_index]);
+		am33xx_register_ecap(0, &pwm_pdata[0]);
 		platform_device_register(&am335x_backlight);
 	}
 	return status;
 }
-late_initcall(backlight_init);
+late_initcall(ecap0_init);
+
+static void enable_ehrpwm1(int evm_id, int profile)
+{
+	ehrpwm_backlight_enable = true;
+	/*am33xx_register_ehrpwm(1, &pwm_pdata[1]);
+	 *TODO:no longer required as we are registering 
+	 *all pwms for the beaglebone
+	 */
+}
+
+/* Setup pwm-backlight for bbtoys7lcd */
+static struct platform_device bbtoys7lcd_backlight = {
+	.name           = "pwm-backlight",
+	.id             = -1,
+	.dev            = {
+		.platform_data  = &bbtoys7lcd_backlight_data,
+	}
+};
+
+static int __init ehrpwm1_init(void)
+{
+	int status = 0;
+	if (ehrpwm_backlight_enable) {
+		platform_device_register(&bbtoys7lcd_backlight);
+	}
+	return status;
+}
+late_initcall(ehrpwm1_init);
 
 static int __init conf_disp_pll(int rate)
 {
@@ -1038,7 +1976,8 @@ out:
 
 static void lcdc_init(int evm_id, int profile)
 {
-	struct da8xx_lcdc_platform_data *lcdc_pdata;
+
+	setup_pin_mux(lcdc16_pin_mux);
 	setup_pin_mux(lcdc_pin_mux);
 
 	if (conf_disp_pll(300000000)) {
@@ -1046,32 +1985,316 @@ static void lcdc_init(int evm_id, int profile)
 				"register LCDC\n");
 		return;
 	}
-	switch (evm_id) {
-	case GEN_PURP_EVM:
-	case GEN_PURP_DDR3_EVM:
-		lcdc_pdata = &TFC_S9700RTWV35TR_01B_pdata;
-		break;
-	case EVM_SK:
-		lcdc_pdata = &NHD_480272MF_ATXI_pdata;
-		break;
-	default:
-		pr_err("LCDC not supported on this evm (%d)\n",evm_id);
-		return;
-	}
 
-	if (am33xx_register_lcdc(lcdc_pdata))
+	if (am33xx_register_lcdc(&TFC_S9700RTWV35TR_01B_pdata))
 		pr_info("Failed to register LCDC device\n");
-
 	return;
 }
 
-static void mfd_tscadc_init(int evm_id, int profile)
+#define BEAGLEBONE_LCD_AVDD_EN GPIO_TO_PIN(0, 7)
+#define BEAGLEBONE_LCD7A2_AVDD_EN GPIO_TO_PIN(1, 31)
+#define BEAGLEBONE_LCD7A3_AVDD_EN GPIO_TO_PIN(0, 2)
+
+static void bbtoys7lcd_init(int evm_id, int profile)
+{
+	setup_pin_mux(lcdc16_pin_mux);
+
+	// we are being stupid and setting pixclock from here instead of da8xx-fb.c
+	if (conf_disp_pll(300000000)) {
+		pr_info("Failed to set pixclock to 300000000, not attempting to"
+				"register LCD cape\n");
+		return;
+	}
+	
+	if (am33xx_register_lcdc(&bbtoys7_pdata))
+		pr_info("Failed to register Beagleboardtoys 7\" LCD cape device\n");
+		
+	return;
+}
+
+static void bbtoys35lcd_init(int evm_id, int profile)
+{
+	setup_pin_mux(lcdc16_pin_mux);
+	setup_pin_mux(bbtoys35_pin_mux);
+	
+	// we are being stupid and setting pixclock from here instead of da8xx-fb.c
+	if (conf_disp_pll(16000000)) {
+		pr_info("Failed to set pixclock to 16000000, not attempting to"
+				"register LCD cape\n");
+		return;
+	}
+	
+	if (am33xx_register_lcdc(&bbtoys35_pdata))
+		pr_info("Failed to register Beagleboardtoys 3.5\" LCD cape device\n");
+	
+	return;
+}
+
+#define BEAGLEBONEDVI_PDn_A1  GPIO_TO_PIN(1, 7)
+#define BEAGLEBONEDVI_PDn_A2  GPIO_TO_PIN(1, 31)
+
+static void dvi_init(int evm_id, int profile)
+{
+	setup_pin_mux(lcdc16_pin_mux);
+
+	// we are being stupid and setting pixclock from here instead of da8xx-fb.c
+	if (conf_disp_pll(560000000)) {
+		pr_info("Failed to set pixclock to 56000000, not attempting to"
+				"register DVI adapter\n");
+		return;
+	}
+	
+	if (am33xx_register_lcdc(&dvi_pdata))
+		pr_info("Failed to register BeagleBoardToys DVI cape\n");
+	return;
+}
+
+static void tsc_init(int evm_id, int profile)
 {
 	int err;
 
-	err = am33xx_register_mfd_tscadc(&tscadc);
+	if (gp_evm_revision == GP_EVM_REV_IS_1_1A) {
+		am335x_touchscreen_data.analog_input = 1;
+		pr_info("TSC connected to beta GP EVM\n");
+	}
+	if (gp_evm_revision == GP_EVM_REV_IS_1_1A) {
+		am335x_touchscreen_data.analog_input = 0;
+		pr_info("TSC connected to alpha GP EVM\n");
+	}
+	if( gp_evm_revision == GP_EVM_ACTUALLY_BEAGLEBONE) {
+		am335x_touchscreen_data.analog_input = 1;
+		pr_info("TSC connected to BeagleBone\n");;	
+	}
+	setup_pin_mux(tsc_pin_mux);
+
+	err = am33xx_register_tsc(&am335x_touchscreen_data);
 	if (err)
 		pr_err("failed to register touchscreen device\n");
+}
+
+static void bone_tsc_init(int evm_id, int profile)
+{
+	int err;
+	setup_pin_mux(tsc_pin_mux);
+	err = am33xx_register_tsc(&bone_touchscreen_data);
+	if (err)
+		pr_err("failed to register touchscreen device\n");
+}
+
+
+static void boneleds_init(int evm_id, int profile )
+{
+	int err;
+	setup_pin_mux(bone_pin_mux);
+	err = platform_device_register(&bone_leds_gpio);
+	if (err)
+		pr_err("failed to register BeagleBone LEDS\n");
+}
+
+static void dvileds_init(int evm_id, int profile )
+{
+	int err;
+	err = platform_device_register(&dvi_leds_gpio);
+	if (err)
+		pr_err("failed to register BeagleBone DVI cape LEDS\n");
+}
+
+static struct resource cssp_camera_resources[] = {
+	{
+		.name = "gpmc_phys_mem_slot",
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+static struct mt9t112_camera_info mt9t111_cam_info = {
+	/* divider calculated for 32Mhz CAM_MCLK */
+	.divider = {
+		.m = 24, .n = 1,
+		.p1 = 0, .p2 = 7, .p3 = 0, .p4 = 10, .p5 = 14, .p6 = 7, .p7 = 0,
+	},
+};
+
+static struct soc_camera_link mt9t111_camera_link =  {
+	.priv = &mt9t111_cam_info,
+	.i2c_adapter_id = 3,
+};
+
+static struct i2c_board_info i2c_camera = {
+	I2C_BOARD_INFO("mt9t112", 0x3c),
+	.platform_data = &mt9t111_camera_link,
+};
+
+struct cssp_cam_platform_data {
+	struct i2c_board_info *cam_i2c_board_info;
+	const char *cam_clk_name;
+	int dma_ch;
+	int cssp_reset_pin;
+};
+
+static struct cssp_cam_platform_data cssp_cam_platform_data = {
+	.cam_i2c_board_info = &i2c_camera,
+	.cam_clk_name = "clkout2_ck",
+	.dma_ch = AM33XX_DMA_XDMA_EVENT_INTR2,
+	.cssp_reset_pin = GPIO_TO_PIN(0, 4),
+};
+
+static struct platform_device cssp_camera = {
+	.name  = "cssp-camera",
+	.id    = -1,
+	.dev   = {
+		.platform_data = &cssp_cam_platform_data,
+	},
+	.num_resources = sizeof(cssp_camera_resources) / sizeof(cssp_camera_resources[0]),
+	.resource = cssp_camera_resources,
+};
+
+static struct gpmc_timings cssp_timings = {
+	/* Minimum clock period for synchronous mode (in picoseconds) */
+	.sync_clk = 20000,
+
+	/* CS signal timings corresponding to GPMC_CONFIG2 */
+	.cs_on = 1,
+	.cs_rd_off = 16 * 10,		/* Read deassertion time */
+	.cs_wr_off = 31 * 10,		/* Write deassertion time */
+
+	/* ADV signal timings corresponding to GPMC_CONFIG3 */
+	.adv_on = 0,			/* Assertion time */
+	.adv_rd_off = 4 * 10,		/* Read deassertion time */
+	.adv_wr_off = 4 * 10,		/* Write deassertion time */
+
+	/* WE signals timings corresponding to GPMC_CONFIG4 */
+	.we_on = 6 * 10,		/* WE assertion time */
+	.we_off = 31 * 10,		/* WE deassertion time */
+
+	/* OE signals timings corresponding to GPMC_CONFIG4 */
+	.oe_on = 6 * 10,		/* OE assertion time */
+	.oe_off = 16 * 10,		/* OE deassertion time */
+
+	/* Access time and cycle time timings corresponding to GPMC_CONFIG5 */
+	.page_burst_access = 2 * 10,	/* Multiple access word delay */
+	.access = 14 * 10,		/* Start-cycle to first data valid delay */
+	.rd_cycle = 16 * 10,		/* Total read cycle time */
+	.wr_cycle = 31 * 10,		/* Total write cycle time */
+
+	/* The following are only on OMAP3430 */
+	.wr_access = 10 * 10,		/* WRACCESSTIME */
+	.wr_data_mux_bus = 6 * 10,	/* WRDATAONADMUXBUS */
+};
+
+static int gpmc_cssp_init(void)
+{
+	int cs = 1; /* Chip Select on GPMC bus */
+	int val;
+	long unsigned int cssp_gpmc_mem_base_phys;
+
+	if (gpmc_cs_request(cs, SZ_16M, &cssp_gpmc_mem_base_phys) < 0) {
+			printk(KERN_ERR "[cssp_cam platform init]: gpmc_cs_request failed\n");
+			return -1;
+	}
+
+	cssp_camera_resources[0].start = cssp_gpmc_mem_base_phys;
+	cssp_camera_resources[0].end = cssp_gpmc_mem_base_phys + 0x1ffff;
+
+	if (gpmc_cs_configure(cs, GPMC_CONFIG_DEV_TYPE, GPMC_DEVICETYPE_NOR) < 0) {
+			printk(KERN_ERR "[cssp_cam platform init]: gpmc_cs_configure failed\n");
+			return -1;
+	}
+
+	val = GPMC_CONFIG1_READMULTIPLE_SUPP;
+	val |= GPMC_CONFIG1_READTYPE_SYNC;
+	val |= GPMC_CONFIG1_WRITETYPE_SYNC;
+	val |= GPMC_CONFIG1_CLKACTIVATIONTIME(2);
+	val |= GPMC_CONFIG1_PAGE_LEN(2);
+	val |= GPMC_CONFIG1_DEVICESIZE_16;
+	val |= GPMC_CONFIG1_DEVICETYPE_NOR;
+	val |= GPMC_CONFIG1_MUXADDDATA;
+	gpmc_cs_write_reg(cs, GPMC_CS_CONFIG1, val);
+
+	if (gpmc_cs_set_timings(cs, &cssp_timings) < 0) {
+		printk(KERN_ERR "Failed gpmc_cs_set_timings for QuickLogic CAMIF device\n");
+		goto free;
+	}
+
+	val = gpmc_cs_read_reg(cs, GPMC_CS_CONFIG6);
+	val &= 0xe0f0f030;
+	val |= 0x0a060484;
+	gpmc_cs_write_reg(cs, GPMC_CS_CONFIG6, val);
+
+	printk(KERN_INFO "gpmc_cssp_init for QuickLogic CAMIF device succeeded\n");
+
+	return 0;
+
+free:
+	gpmc_cs_free(cs);
+
+	printk(KERN_ERR "Could not initialize QuickLogic CAMIF device\n");
+
+	return -1;
+}
+
+#define BEAGLEBONE_CAMERA_ORIENTATION GPIO_TO_PIN(0, 30)
+
+static void cssp_gpmc_init(void)
+{
+	struct gpmc_devices_info gpmc_device[2] = {
+			{ NULL, GPMC_DEVICE_NOR },
+		};
+	int status;
+
+	setup_pin_mux(gpmc_pin_mux);
+	setup_pin_mux(camera_cape_pin_mux);
+
+	omap_init_gpmc(gpmc_device, sizeof(gpmc_device));
+	gpmc_cssp_init();
+
+	/* Get the sensor orientation and setup sensor flags as appropriate */
+	status = gpio_request(BEAGLEBONE_CAMERA_ORIENTATION, "camera orientation");
+	if (status < 0) {
+		pr_err("Failed to request gpio for camera sensor orientation");
+	} else {
+		int orientation;
+
+		orientation = gpio_get_value(BEAGLEBONE_CAMERA_ORIENTATION);
+		if (orientation == 0) {
+			mt9t111_cam_info.flags = MT9T112_FLAG_VFLIP;
+			pr_info("Camera cape sensor is facing forward\n");
+		} else {
+			pr_info("Camera cape sensor is facing backward\n");
+		}
+	}
+
+	platform_device_register(&cssp_camera);
+
+	printk(KERN_INFO "[cssp_cam platform init]: cssp_gpmc_init: DONE\n");
+}
+
+
+static void lcd3leds_init(int evm_id, int profile )
+{
+	int err;
+	err = platform_device_register(&lcd3_leds_gpio);
+	if (err)
+		pr_err("failed to register BeagleBone LCD cape LEDs\n");
+}
+
+static void lcd7leds_init(int evm_id, int profile )
+{
+	int err;
+	err = platform_device_register(&lcd7_leds_gpio);
+	if (err)
+		pr_err("failed to register BeagleBone LCD cape LED\n");
+}
+
+static void bonew1_gpio_init(int evm_id, int profile )
+{
+	beaglebone_w1gpio_free = 0;
+	int err;
+	setup_pin_mux(w1_gpio_pin_mux);
+	err = platform_device_register(&bone_w1_device);
+	if (err)
+		pr_err("failed to register w1-gpio\n");
+	else
+		pr_info("w1-gpio connected to P8_6\n");
 }
 
 static void rgmii1_init(int evm_id, int profile)
@@ -1121,17 +2344,6 @@ static void uart3_init(int evm_id, int profile)
 static void uart2_init(int evm_id, int profile)
 {
 	setup_pin_mux(uart2_pin_mux);
-	return;
-}
-
-/*
- * gpio0_7 was driven HIGH in u-boot before DDR configuration
- *
- * setup gpio0_7 for EVM-SK 1.2
- */
-static void gpio_ddr_vtt_enb_init(int evm_id, int profile)
-{
-	setup_pin_mux(gpio_ddr_vtt_enb_pin_mux);
 	return;
 }
 
@@ -1253,6 +2465,16 @@ static struct spi_board_info am335x_spi1_slave_info[] = {
 	},
 };
 
+static struct spi_board_info bone_spidev2_info[] = {
+	{
+		.modalias      = "spidev",
+		.irq           = -1,
+		.max_speed_hz  = 12000000,
+		.bus_num       = 2,
+		.chip_select   = 0,
+	},
+};
+
 static struct gpmc_timings am335x_nand_timings = {
 	.sync_clk = 0,
 
@@ -1296,6 +2518,15 @@ static void evm_nand_init(int evm_id, int profile)
 	omap_init_gpmc(gpmc_device, sizeof(gpmc_device));
 	omap_init_elm();
 }
+
+static struct regulator_consumer_supply bone_audio_supplies[] = {
+        /* tlv320aic3x analog supplies */
+        REGULATOR_SUPPLY("AVDD", "3-001b"),
+        REGULATOR_SUPPLY("DRVDD", "3-001b"),
+        /* tlv320aic3x digital supplies */
+        REGULATOR_SUPPLY("IOVDD", "3-001b"),
+        REGULATOR_SUPPLY("DVDD", "3-001b"),
+};
 
 /* TPS65217 voltage regulator support */
 
@@ -1384,20 +2615,6 @@ static struct regulator_consumer_supply tps65217_ldo4_consumers[] = {
 	},
 };
 
-/*
- * FIXME: Some BeagleBones reuire a ramp_delay to settle down the set
- * voltage from 0.95v to 1.25v. By default a minimum of 70msec is set
- * based on experimentation. This will be removed/modified to exact
- * value, once the root cause is known.
- *
- * The reason for extended ramp time requirement on BeagleBone is not
- * known and the delay varies from board - board, if the board hangs
- * with this 70msec delay then try to increase the value.
- */
-static struct tps65217_rdelay dcdc2_ramp_delay = {
-	.ramp_delay = 70000,
-};
-
 static struct regulator_init_data tps65217_regulator_data[] = {
 	/* dcdc1 */
 	{
@@ -1423,7 +2640,6 @@ static struct regulator_init_data tps65217_regulator_data[] = {
 		},
 		.num_consumer_supplies = ARRAY_SIZE(tps65217_dcdc2_consumers),
 		.consumer_supplies = tps65217_dcdc2_consumers,
-		.driver_data = &dcdc2_ramp_delay,
 	},
 
 	/* dcdc3 */
@@ -1498,7 +2714,6 @@ static struct regulator_init_data tps65217_regulator_data[] = {
 
 static struct tps65217_board beaglebone_tps65217_info = {
 	.tps65217_init_data = &tps65217_regulator_data[0],
-	.status_off = true,
 };
 
 static struct lis3lv02d_platform_data lis331dlh_pdata = {
@@ -1522,49 +2737,13 @@ static struct lis3lv02d_platform_data lis331dlh_pdata = {
 	.st_max_limits[2] = 750,
 };
 
-static struct i2c_board_info lis331dlh_i2c_boardinfo[] = {
+static struct i2c_board_info am335x_i2c_boardinfo1[] = {
+	{
+		I2C_BOARD_INFO("tlv320aic3x", 0x1b),
+	},
 	{
 		I2C_BOARD_INFO("lis331dlh", 0x18),
 		.platform_data = &lis331dlh_pdata,
-	},
-};
-
-static void lis331dlh_init(int evm_id, int profile)
-{
-	struct i2c_adapter *adapter;
-	struct i2c_client *client;
-	unsigned int i2c_instance;
-
-	switch (evm_id) {
-	case GEN_PURP_EVM:
-	case GEN_PURP_DDR3_EVM:
-		i2c_instance = 2;
-		break;
-	case EVM_SK:
-		i2c_instance = 1;
-		break;
-	default:
-		pr_err("lis331dlh is not supported on this evm (%d)\n", evm_id);
-		return;
-	}
-
-	/* I2C adapter request */
-	adapter = i2c_get_adapter(i2c_instance);
-	if (!adapter) {
-		pr_err("failed to get adapter i2c%u\n", i2c_instance);
-		return;
-	}
-
-	client = i2c_new_device(adapter, lis331dlh_i2c_boardinfo);
-	if (!client)
-		pr_err("failed to register lis331dlh to i2c%u\n", i2c_instance);
-
-	i2c_put_adapter(adapter);
-}
-
-static struct i2c_board_info am335x_i2c1_boardinfo[] = {
-	{
-		I2C_BOARD_INFO("tlv320aic3x", 0x1b),
 	},
 	{
 		I2C_BOARD_INFO("tsl2550", 0x39),
@@ -1577,20 +2756,49 @@ static struct i2c_board_info am335x_i2c1_boardinfo[] = {
 static void i2c1_init(int evm_id, int profile)
 {
 	setup_pin_mux(i2c1_pin_mux);
-	omap_register_i2c_bus(2, 100, am335x_i2c1_boardinfo,
-			ARRAY_SIZE(am335x_i2c1_boardinfo));
+	omap_register_i2c_bus(2, 100, am335x_i2c_boardinfo1,
+			ARRAY_SIZE(am335x_i2c_boardinfo1));
 	return;
 }
 
-static struct i2c_board_info am335x_i2c2_boardinfo[] = {
+static struct mcp251x_platform_data mcp251x_info = {
+	.oscillator_frequency = 16000000,
 };
 
-static void i2c2_init(int evm_id, int profile)
+static struct spi_board_info tt3201_spi_info[] = {
+	{
+		.modalias	= "mcp2515",
+		.max_speed_hz	= 10000000,
+		.bus_num	= 2,
+		.chip_select	= 0,
+		.mode		= SPI_MODE_0,
+		.platform_data	= &mcp251x_info,
+	},
+	{
+		.modalias	= "mcp2515",
+		.max_speed_hz	= 10000000,
+		.bus_num	= 2,
+		.chip_select	= 1,
+		.mode		= SPI_MODE_0,
+		.platform_data	= &mcp251x_info,
+	},
+};
+
+static void tt3201_init(int evm_id, int profile)
 {
-	setup_pin_mux(i2c2_pin_mux);
-	omap_register_i2c_bus(3, 100, am335x_i2c2_boardinfo,
-			ARRAY_SIZE(am335x_i2c2_boardinfo));
-	return;
+	pr_info("TowerTech TT3201 CAN cape\n");
+	
+	beaglebone_spi1_free = 0;
+	setup_pin_mux(spi1_pin_mux);
+	setup_pin_mux(tt3201_pin_mux);
+
+	tt3201_spi_info[0].irq = gpio_to_irq(GPIO_TO_PIN(3, 19));
+	tt3201_spi_info[1].irq = gpio_to_irq(GPIO_TO_PIN(3, 21));
+
+	spi_register_board_info(tt3201_spi_info,
+		ARRAY_SIZE(tt3201_spi_info));
+
+	am33xx_d_can_init(1);
 }
 
 /* Setup McASP 1 */
@@ -1598,23 +2806,691 @@ static void mcasp1_init(int evm_id, int profile)
 {
 	/* Configure McASP */
 	setup_pin_mux(mcasp1_pin_mux);
-	switch (evm_id) {
-	case EVM_SK:
-		am335x_register_mcasp(&am335x_evm_sk_snd_data1, 1);
+	am335x_register_mcasp(&am335x_evm_snd_data1, 1);
+	return;
+}
+
+/* Setup McASP 0 */
+static void mcasp0_init(int evm_id, int profile)
+{
+	printk("Beaglebone cape: mcasp0 init\n");
+	/* Configure McASP */
+	setup_pin_mux(mcasp0_pin_mux);
+	am335x_register_mcasp(&bone_snd_data1, 0);
+	return;
+}
+
+static void mmc0_init(int evm_id, int profile)
+{
+	setup_pin_mux(mmc0_pin_mux);
+
+	omap2_hsmmc_init(am335x_mmc);
+	return;
+}
+
+static void emmc_bone_init(int evm_id, int profile)
+{
+	printk("cape: emmc_bone_init\n");
+	setup_pin_mux(mmc1_pin_mux);
+	am335x_mmc[1].mmc = 2;
+	am335x_mmc[1].caps = MMC_CAP_4_BIT_DATA;
+	am335x_mmc[1].nonremovable = true;
+	am335x_mmc[1].gpio_cd = -EINVAL;
+	am335x_mmc[1].gpio_wp = -EINVAL;
+	am335x_mmc[1].ocr_mask = MMC_VDD_32_33 | MMC_VDD_33_34; /* 3V3 */
+	/* mmc will be initialized when mmc0_init is called */
+	return;
+}
+
+static const char* cape_pins[] = {
+/*
+  From SRM RevA5.0.1:
+*/
+  /* offset  88 - P9-22 */ "uart2_rxd",
+  /* offset  90 - P9-21 */ "uart2_txd",
+  /* offset  92 - P9-18 */ "spi0_d1",
+  /* offset  94 - P9-17 */ "spi0_cs0",
+  /* offset  96 - P9-42 */ "ecap0_in_pwm0_out",
+  /* offset  98 - P8-35 */ "lcd_data12",
+  /* offset 100 - P8-33 */ "lcd_data13",
+  /* offset 102 - P8-31 */ "lcd_data14",
+  /* offset 104 - P8-32 */ "lcd_data15",
+  /* offset 106 - P9-19 */ "uart1_rtsn",
+  /* offset 108 - P9-20 */ "uart1_ctsn",
+  /* offset 110 - P9-26 */ "uart1_rxd",
+  /* offset 112 - P9-24 */ "uart1_txd",
+  /* offset 114 - P9-41 */ "xdma_event_intr1",
+  /* offset 116 - P8-19 */ "gpmc_ad8",
+  /* offset 118 - P8-13 */ "gpmc_ad9",
+  /* offset 120 - P8-14 */ "gpmc_ad10",
+  /* offset 122 - P8-17 */ "gpmc_ad12",
+  /* offset 124 - P9-11 */ "gpmc_wait0",
+  /* offset 126 - P9-13 */ "gpmc_wpn",
+  /* offset 128 - P8-25 */ "gpmc_ad0",
+  /* offset 130 - P8-24 */ "gpmc_ad1",
+  /* offset 132 - P8- 5 */ "gpmc_ad2",
+  /* offset 134 - P8- 6 */ "gpmc_ad3",
+  /* offset 136 - P8-23 */ "gpmc_ad4",
+  /* offset 138 - P8-22 */ "gpmc_ad5",
+  /* offset 140 - P8- 3 */ "gpmc_ad6",
+  /* offset 142 - P8- 4 */ "gpmc_ad7",
+  /* offset 144 - P8-12 */ "gpmc_ad12",
+  /* offset 146 - P8-11 */ "gpmc_ad13",
+  /* offset 148 - P8-16 */ "gpmc_ad14",
+  /* offset 150 - P8-15 */ "gpmc_ad15",
+  /* offset 152 - P9-15 */ "gpmc_a0",
+  /* offset 154 - P9-23 */ "gpmc_a1",
+  /* offset 156 - P9-14 */ "gpmc_a2",
+  /* offset 158 - P9-16 */ "gpmc_a3",
+  /* offset 160 - P9-12 */ "gpmc_be1n",
+  /* offset 162 - P8-26 */ "gpmc_csn0",
+  /* offset 164 - P8-21 */ "gpmc_csn1",
+  /* offset 166 - P8-20 */ "gpmc_csn2",
+  /* offset 168 - P8-18 */ "gpmc_clk",
+  /* offset 170 - P8-7  */ "gpmc_advn_ale",
+  /* offset 172 - P8-9  */ "gpmc_ben0_cle",
+  /* offset 174 - P8-10 */ "gpmc_wen",
+  /* offset 176 - P8-8  */ "gpmc_csn3",
+  /* offset 178 - P8-45 */ "lcd_data0",
+  /* offset 180 - P8-46 */ "lcd_data1",
+  /* offset 182 - P8-43 */ "lcd_data2",
+  /* offset 184 - P8-44 */ "lcd_data3",
+  /* offset 186 - P8-41 */ "lcd_data4",
+  /* offset 188 - P8-42 */ "lcd_data5",
+  /* offset 190 - P8-39 */ "lcd_data6",
+  /* offset 192 - P8-40 */ "lcd_data7",
+  /* offset 194 - P8-37 */ "lcd_data8",
+  /* offset 196 - P8-38 */ "lcd_data9",
+  /* offset 198 - P8-36 */ "lcd_data10",
+  /* offset 200 - P8-34 */ "lcd_data11",
+  /* offset 202 - P8-27 */ "lcd_vsync",
+  /* offset 204 - P8-29 */ "lcd_hsync",
+  /* offset 206 - P8-28 */ "lcd_pclk",
+  /* offset 208 - P8-30 */ "lcd_ac_bias_en",
+  /* offset 210 - P9-29 */ "mcasp0_fsx",
+  /* offset 212 - P9-30 */ "mcasp0_axr0",
+  /* offset 214 - P9-28 */ "mcasp0_ahclkr",
+  /* offset 216 - P9-27 */ "mcasp0_fsr",
+  /* offset 218 - P9-31 */ "mcasp0_aclkx",
+  /* offset 220 - P9-25 */ "mcasp0_ahclkx",
+  /* offset 222 - P9-39 */ "ain0",
+  /* offset 224 - P9-40 */ "ain1",
+  /* offset 226 - P9-37 */ "ain2",
+  /* offset 228 - P9-38 */ "ain3",
+  /* offset 230 - P9-33 */ "ain4",
+  /* offset 232 - P9-36 */ "ain5",
+  /* offset 234 - P9-35 */ "ain6",
+};
+
+#define BIG_ENDIAN_16( i) ( ((i & 255) << 8) | ((i >> 8) & 255) )
+#define NR_ITEMS( x) (sizeof( (x)) / sizeof( *(x)))
+
+extern int am33xx_mux_get_entry( int index, struct omap_mux** mux);
+
+typedef union {
+/*
+  From SRM RevA5.0.1:
+  Bit 15     Pin is used or not: 0=Unused by Cape 1=Used by Cape
+  Bit 14-13  Pin Direction: 10=Output 01=Input 11=BDIR
+  Bit 12-7   Reserved
+  Bit 6	     Slew Rate: 0=Fast 1=Slow
+  Bit 5	     Rx Enable: 0=Disabled 1=Enabled
+  Bit 4	     Pull Up/Dn Select: 0=Pulldown 1=PullUp
+  Bit 3	     Pull Up/DN enabled: 0=Enabled 1=Disabled
+  Bit 2-0    Mux Mode Selection: Mode 0-7
+*/
+	struct {
+		uint16_t    mux		    : 3;
+		uint16_t    pull_enable	    : 1;
+		uint16_t    pull_up	    : 1;
+		uint16_t    rx_enable	    : 1;
+		uint16_t    slew_rate	    : 1;
+		uint16_t    reserved	    : 6;
+		uint16_t    direction	    : 2;
+		uint16_t    used	    : 1;
+	};
+	uint16_t      value;
+} pin_def;
+
+#define DEBUG_EEPROM_CONFIG 0
+
+static int bone_io_get_mux_setting( pin_def setting)
+{
+	int pin_setting;
+
+	switch (setting.direction) {
+	case 1:
+	/* input */
+		if (setting.pull_enable) {
+			if (setting.pull_up) {
+				pin_setting = AM33XX_PIN_INPUT_PULLUP;
+			} else {
+				pin_setting = AM33XX_PIN_INPUT_PULLDOWN;
+			}
+		} else {
+			pin_setting = AM33XX_PIN_INPUT;
+		}
+		if (!setting.rx_enable) {
+			pr_debug( "  pin is set as input but the receiver is not enabled!\n");
+		}
 		break;
+	case 2:
+	/* output */
+		pin_setting = AM33XX_PIN_OUTPUT;
+		break;
+	case 3:
+	/* bi-dir */
 	default:
-		am335x_register_mcasp(&am335x_evm_snd_data1, 1);
+	/* reserved */
+		pr_debug( "  pin ignored because it uses an unsupported mode: 0x%04x\n",
+			setting.direction);
+		return -1;
+	}
+	pr_debug("  pin is configured as %s\n",
+		(pin_setting & AM33XX_PIN_INPUT) ? "input" : "output");
+	switch (setting.mux) {
+	case 0: pin_setting |= OMAP_MUX_MODE0; break;
+	case 1: pin_setting |= OMAP_MUX_MODE1; break;
+	case 2: pin_setting |= OMAP_MUX_MODE2; break;
+	case 3: pin_setting |= OMAP_MUX_MODE3; break;
+	case 4: pin_setting |= OMAP_MUX_MODE4; break;
+	case 5: pin_setting |= OMAP_MUX_MODE5; break;
+	case 6: pin_setting |= OMAP_MUX_MODE6; break;
+	case 7: pin_setting |= OMAP_MUX_MODE7; break;
+	}
+	return pin_setting;
+}
+
+static struct omap_mux* bone_io_pin_lookup( const char* pin_name)
+{
+	int index = 0;
+	struct omap_mux* mux;
+
+	for (;;) {
+		if (am33xx_mux_get_entry( index, &mux) < 0) {
+			/* no more entries */
+			pr_debug( "   configuration error, pin '%s' not found in mux database\n",
+				pin_name);
+			return NULL;
+		}
+		if (mux != NULL &&
+		    mux->muxnames[ 0] != NULL &&
+		    strcmp( mux->muxnames[ 0], pin_name) == 0)
+		{
+			/* entry found */
+			pr_debug( "   found pin '%s' at index %d in mux database'\n",
+				pin_name, index);
+			return mux;
+		}
+		++index;
+	}
+}
+
+static int bone_io_config_pin( const char* pin_name, pin_def eeprom_setting)
+{
+	struct omap_mux* mux;
+	char* signal_name;
+	int pin_setting = bone_io_get_mux_setting( eeprom_setting);
+	int l1, l2;
+	char full_name[ 50];
+
+	if (pin_setting < 0) {
+		return -1;
 	}
 
-	return;
+	mux = bone_io_pin_lookup( pin_name);
+
+	if (mux == NULL) {
+		return -1;
+	}
+
+	signal_name = mux->muxnames[ eeprom_setting.mux];
+
+	if (signal_name == NULL) {
+		pr_debug( "    Configuration error, no signal found for pin '%s' in mode %d\n",
+			pin_name, eeprom_setting.mux);
+		return -1;
+	}
+	pr_debug( "    setting pin '%s' to signal '%s'\n",
+		 pin_name, signal_name);
+	l1 = strlen( pin_name);
+	l2 = strlen( signal_name);
+
+	if (l1 + 1 + l2 + 1 > sizeof( full_name)) {
+		pr_debug( "    Internal error, combined signal name too long\n");
+		return -1;
+	} else {
+		memcpy( full_name, pin_name, l1);
+		full_name[ l1] = '.';
+		memcpy( full_name + l1 + 1, signal_name, l2);
+		full_name[ l1 + 1 + l2] = '\0';
+		if (omap_mux_init_signal( full_name, pin_setting) < 0) {
+			return -1;
+		}
+		pr_debug( "	mux '%s' was set to mode 0x%04x\n",
+			 full_name, pin_setting);
+	}
+	// return 0 for input, 1 for output
+	return (pin_setting & AM33XX_PIN_INPUT) ? 0 : 1;
+}
+
+#define RULER( x) \
+	do { \
+		char* p = status; \
+		int i = 0; \
+		int cnt = x; \
+		status[ cnt] = '\0'; \
+		while (cnt--) { \
+			if (++i == 10) { \
+				*p++ = '+'; \
+				i = 0; \
+			} else { \
+				*p++ = '-'; \
+			} \
+		} \
+		pr_info( "+%s+\n", status); \
+	} while (0)
+
+static int bone_io_config_from_cape_eeprom( void)
+{
+	int i;
+	int cnt = BIG_ENDIAN_16( cape_config.numpins);
+	u16* pmuxdata;
+	char status[ NR_ITEMS( cape_config.muxdata) + 1];
+	char revision[ NR_ITEMS( cape_config.format_revision) + 1];
+
+	strncpy( revision, cape_config.format_revision, NR_ITEMS( revision) - 1);
+	revision[ NR_ITEMS( revision) - 1] = '\0';
+	if (strcmp( revision, "A0") != 0) {
+		pr_warn( "BeagleBone cape: configuration revision '%s' is not supported\n",
+			revision);
+		return -1;
+	}
+
+	// Workaround for capes that have encoded this as ASCII
+	if (cnt > 256) {
+		pr_info( "BeagleBone cape: workaround for bad 'numpins' setting\n");
+		cnt = (cape_config.numpins & 255) - '0';
+		cnt = 10 * cnt + ((cape_config.numpins >> 8) & 255) - '0';
+	}
+	pr_info( "BeagleBone cape: revision %s format, configuring %2d out of %2d signals:\n",
+		revision, cnt, NR_ITEMS( cape_config.muxdata));
+	RULER( NR_ITEMS( cape_config.muxdata));
+	for (i = 0, pmuxdata = cape_config.muxdata ; i < NR_ITEMS( cape_config.muxdata) ; ++i, ++pmuxdata) {
+		const char* pin_name = cape_pins[ i];
+		pin_def pin_setting = { .value = BIG_ENDIAN_16( *pmuxdata) };
+
+		// Detect broken I2C configuration to prevent bus hangup!
+		if (i >= 9 && i <= 10) {
+			status[ i] = '-';
+		} else if (pin_setting.used) {
+			switch (bone_io_config_pin( pin_name, pin_setting)) {
+			case 0:	 status[ i] = 'i'; break;
+			case 1:	 status[ i] = 'o'; break;
+			default: status[ i] = '#'; break;
+			}
+		} else {
+			status[ i] = ' ';
+		}
+	}
+	status[ NR_ITEMS( cape_config.muxdata)] = '\0';
+	pr_info( "|%s|\n", status);
+	RULER( NR_ITEMS( cape_config.muxdata));
+	return 0;
+}
+static void beaglebone_cape_setup(struct memory_accessor *mem_acc, void *context)
+{
+	int ret;
+	char tmp[32];
+	char name[32];
+	char version[4];
+	char manufacturer[32];
+
+	capecount++;
+	/* get cape specific data */
+	ret = mem_acc->read(mem_acc, (char *)&cape_config, 0, sizeof(cape_config));
+	if (ret != sizeof(cape_config)) {
+		pr_warning("BeagleBone cape EEPROM: could not read eeprom at address 0x%x\n", capecount + 0x53);
+		goto out2;
+	}
+
+	if (cape_config.header != AM335X_EEPROM_HEADER) {
+		pr_warning("BeagleBone cape EEPROM: wrong header 0x%x, expected 0x%x\n",
+			cape_config.header, AM335X_EEPROM_HEADER);
+		goto out;
+	}
+
+	pr_info("BeagleBone cape EEPROM: found eeprom at address 0x%x\n", capecount + 0x53);
+	snprintf(name, sizeof(cape_config.name) + 1, "%s", cape_config.name);
+	snprintf(version, sizeof(cape_config.version) + 1, "%s", cape_config.version);
+	snprintf(manufacturer, sizeof(cape_config.manufacturer) + 1, "%s", cape_config.manufacturer);
+	pr_info("BeagleBone cape: %s %s, revision %s\n", manufacturer, name, version);
+	snprintf(tmp, sizeof(cape_config.partnumber) + 1, "%s", cape_config.partnumber);
+	pr_info("BeagleBone cape partnumber: %s\n", tmp);   
+
+	if (!strncmp( "BEBOPR", cape_config.name, 6)) {
+		pr_info( "BeagleBone cape: initializing BEBOPR cape\n");
+		bone_io_config_from_cape_eeprom();
+		return;	// if configured from eeprom, skip all other initialization
+	}
+
+	if (!strncmp("BB-BONE-DVID-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing DVI cape\n");
+		
+		beaglebone_leds_free = 0;
+		dvileds_init(0,0);
+
+		// Uncomment these for custom DVI capes with audio populated
+		//beaglebone_spi1_free = 0;
+		//mcasp0_init(0,0);
+	
+		if (!strncmp("00A1", cape_config.version, 4) || !strncmp("000A", cape_config.version, 4)) {
+			pr_info("BeagleBone cape: DVI init for revision A1 or older\n");
+			setup_pin_mux(dvia1_pin_mux);
+			gpio_request(BEAGLEBONEDVI_PDn_A1, "DVI_PDn");
+			gpio_direction_output(BEAGLEBONEDVI_PDn_A1, 1);
+			dvi_init(0,0);
+		} else {
+			pr_info("BeagleBone cape: DVI init for revision A2 or newer\n");
+			setup_pin_mux(dvia2_pin_mux);
+			gpio_request(BEAGLEBONEDVI_PDn_A2, "DVI_PDn");
+			gpio_direction_output(BEAGLEBONEDVI_PDn_A2, 1);
+			dvi_init(0,0);
+		}
+	}
+
+	if (!strncmp("BB-BONE-DVID-02", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing DVI+audio cape\n");
+
+		beaglebone_leds_free = 0;
+		dvileds_init(0,0);
+
+		beaglebone_spi1_free = 0;
+		mcasp0_init(0,0);
+	
+		setup_pin_mux(dvia2_pin_mux);
+		gpio_request(BEAGLEBONEDVI_PDn_A2, "DVI_PDn");
+		gpio_direction_output(BEAGLEBONEDVI_PDn_A2, 1);
+		dvi_init(0,0);
+	}
+
+	if (!strncmp("BB-BONE-AUDI-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing audio cape\n");
+
+		beaglebone_leds_free = 0;
+		dvileds_init(0,0);
+
+		beaglebone_spi1_free = 0;
+		mcasp0_init(0,0);
+	}
+
+	if (!strncmp("BB-BONE-LCD7-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing LCD cape\n");
+
+		if (!strncmp("00A2", cape_config.version, 4)) {
+			setup_pin_mux(bbtoys7a2_pin_mux);
+			gpio_request(BEAGLEBONE_LCD7A2_AVDD_EN, "BONE_LCD_AVDD_EN");
+			gpio_direction_output(BEAGLEBONE_LCD7A2_AVDD_EN, 1);
+		} else if(!strncmp("00A3", cape_config.version, 4)) {
+			setup_pin_mux(bbtoys7a3_pin_mux);
+			gpio_request(BEAGLEBONE_LCD7A3_AVDD_EN, "BONE_LCD_AVDD_EN");
+			gpio_direction_output(BEAGLEBONE_LCD7A3_AVDD_EN, 1);			
+		} else if(!strncmp("00A4", cape_config.version, 4)) {
+			setup_pin_mux(bbtoys7a3_pin_mux);
+			gpio_request(BEAGLEBONE_LCD7A3_AVDD_EN, "BONE_LCD_AVDD_EN");
+			gpio_direction_output(BEAGLEBONE_LCD7A3_AVDD_EN, 1);			
+		} else {
+			setup_pin_mux(bbtoys7_pin_mux);
+			gpio_request(BEAGLEBONE_LCD_AVDD_EN, "BONE_LCD_AVDD_EN");
+			gpio_direction_output(BEAGLEBONE_LCD_AVDD_EN, 1);
+			bbtoys7lcd_init(0,0);
+		}
+
+		bbtoys7lcd_init(0,0);
+		pr_info("BeagleBone cape: initializing LCD cape touchscreen\n");
+		tsc_init(0,0);
+		pr_info("BeagleBone cape: Registering PWM backlight for LCD cape\n");
+		enable_ehrpwm1(0,0);
+		beaglebone_tsadcpins_free = 0;
+		pr_info("BeagleBone cape: Registering gpio-keys for LCD cape\n");
+		if (!strncmp("00A3", cape_config.version, 4)) {
+			beaglebone_lcd7a3_keys_init(0,0);
+		} else {
+			beaglebone_lcd7_keys_init(0,0);
+		}
+		
+		beaglebone_spi1_free = 0;
+		// A1 or newer
+		beaglebone_leds_free = 0;
+		lcd7leds_init(0,0);
+	}
+	
+	if (!strncmp("BB-BONE-LCD3-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing LCD cape\n");
+		bbtoys35lcd_init(0,0);
+		pr_info("BeagleBone cape: initializing LCD cape touchscreen\n");
+		tsc_init(0,0);
+		beaglebone_tsadcpins_free = 0;
+		
+		if (!strncmp("00A0", cape_config.version, 4)) {
+			pr_info("BeagleBone cape: Registering gpio-keys for LCD3 rev A or earlier cape\n");
+			int err;
+			setup_pin_mux(lcd3_keys_pin_mux);
+			err = platform_device_register(&beaglebone_lcd3_keys);
+			if (err)
+				pr_err("failed to register gpio keys for LCD3 rev A or earlier cape\n");
+			lcd3leds_init(0,0);
+		} else if (!strncmp("00A1", cape_config.version, 4)) {
+			pr_info("BeagleBone cape: Registering gpio-keys for LCD rev A1 or later cape\n");
+			int err;
+			setup_pin_mux(lcd3a1_keys_pin_mux);
+			err = platform_device_register(&lcd3a1_keys);
+			if (err)
+				pr_err("failed to register gpio keys for LCD3 rev A1 or later cape\n");
+			lcd3leds_init(0,0);
+		} else {
+			pr_info("BeagleBone cape: Registering gpio-keys for LCD rev A2 or later cape\n");
+			int err;
+			setup_pin_mux(lcd3a2_keys_pin_mux);
+			err = platform_device_register(&lcd3a2_keys);
+			if (err)
+				pr_err("failed to register gpio keys for LCD3 rev A2 or later cape\n");
+			platform_device_register(&lcd3a2_leds_gpio);
+			// uses PWM backlight instead of PMIC
+			setup_pin_mux(bbtoys3_pin_mux);
+			enable_ehrpwm1(0,0);
+		}
+		beaglebone_spi1_free = 0;
+		beaglebone_leds_free = 0;
+	}
+
+	if (!strncmp("BB-BONE-LCD4-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing LCD cape\n");
+	
+		setup_pin_mux(lcdc16_pin_mux);
+	
+		// we are being stupid and setting pixclock from here instead of da8xx-fb.c
+		if (conf_disp_pll(18000000)) {
+			pr_info("Failed to set pixclock to 18000000, not attempting to"
+					"register LCD cape\n");
+		}
+	
+		if (am33xx_register_lcdc(&bbtoys43_pdata)) {
+			pr_info("Failed to register Beagleboardtoys 4.3\" LCD cape device\n");
+		}
+	
+		pr_info("BeagleBone cape: initializing LCD cape touchscreen\n");
+		tsc_init(0,0);
+		beaglebone_tsadcpins_free = 0;
+		
+		if (!strncmp("00A1", cape_config.version, 4)) {
+			// gpio3_16 is used as DOWN
+			beaglebone_spi1_free = 0;
+
+			setup_pin_mux(bbtoys43a1_pin_mux);
+			platform_device_register(&beaglebone_lcd43_keys);
+
+			gpio_request(GPIO_TO_PIN(3, 19), "LCD4_DISEN");
+			gpio_direction_output(GPIO_TO_PIN(3, 19), 1);
+			gpio_set_value(GPIO_TO_PIN(3, 19), 1);
+
+			enable_ehrpwm1(0,0);
+			setup_pin_mux(ehrpwm1a_pin_mux);
+
+			beaglebone_leds_free = 0;
+			lcd7leds_init(0,0);
+		}
+	}
+	
+	if (!strncmp("BB-BONE-VGA-01", cape_config.partnumber, 14)) {
+		pr_info("BeagleBone cape: initializing VGA cape\n");
+		dvi_init(0,0);
+	}
+	
+	if (!strncmp("BB-BONE-BATT-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing battery cape\n");
+		// gpio1_6, P9_15 lowbat output
+		// AIN4, P9_33 vbat
+		/* LBO doesn't work, so disable it for now
+ 		setup_pin_mux(batterycape_pin_mux);
+		#if defined(CONFIG_CHARGER_GPIO)
+			int err;
+			err = platform_device_register(&beaglebone_charger_device);
+			if (err)
+				pr_err("failed to register BeagleBone battery cape gpio\n");
+		
+		#endif
+		*/
+	}
+
+	if (!strncmp("BB-BONE-eMMC1-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing eMMC cape\n");
+		beaglebone_w1gpio_free = 0;
+		emmc_bone_init(0,0);
+	}
+	
+	if (!strncmp("BB-BONE-SERL-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing CAN cape\n");
+		setup_pin_mux(uart1dcan1_pin_mux);
+		am33xx_d_can_init(1);
+	}
+		if (!strncmp("BB-BONE-SERL-02", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: not initializing Profibus cape\n");
+		// gpio1_0
+		// gpio1_4
+		//foo_init(0,0);
+	}
+		if (!strncmp("BB-BONE-SERL-03", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: initializing RS232 cape\n");
+		pr_info("BeagleBone RS232 cape: only uart2/ttyO2 is supported.\n");
+		pr_info("BeagleBone RS232 cape: Jumper J27 and J23.\n");
+		setup_pin_mux(uart2_pin_mux);
+	}
+		if (!strncmp("BB-BONE-SERL-04", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: not initializing RS485 cape\n");
+		//foo_init(0,0);
+	}
+	
+	if (!strncmp("TT3201-001", cape_config.partnumber, 10)) {
+		beaglebone_skip_mmc0_init = 1;
+
+		pr_info("BeagleBone cape: initializing mmc");
+		mmc0_init(0,0);
+
+		pr_info("BeagleBone cape: initializing CAN cape\n");
+		tt3201_init(0,0);
+	}
+
+	if (!strncmp("BB-BONE-CAM-01", cape_config.partnumber, 14) || !strncmp("BB-BONE-CAM3-01", cape_config.partnumber, 15)) {
+		pr_info("BeagleBone cape: recognized Camera cape\n");
+		beaglebone_w1gpio_free = 0;
+		cssp_gpmc_init();
+	}
+
+	if (!strncmp("BB-BONE-MOTOR-01", cape_config.partnumber, 16)) {
+		pr_info("BeagleBone cape: initializing Motor cape\n");
+		beaglebone_w1gpio_free = 0;
+		beaglebone_spi1_free = 0;
+        }
+
+	goto out2;
+out:
+	/*
+	 * If the EEPROM hasn't been programed or an incorrect header
+	 * or board name are read, assume this is an old beaglebone board
+	 * (< Rev A3)
+	 */
+	pr_err("Could not detect BeagleBone cape properly\n");
+	beaglebone_cape_detected = false;
+out2:
+	if (capecount > 3) {
+		if (beaglebone_skip_mmc0_init == 0 ) {
+			pr_info("BeagleBone cape: initializing mmc");
+			mmc0_init(0,0);
+		}
+		if (beaglebone_tsadcpins_free == 1) {
+			pr_info("BeagleBone cape: exporting ADC pins to sysfs\n");
+			bone_tsc_init(0,0);
+			beaglebone_tsadcpins_free = 0;
+		}
+		if (beaglebone_leds_free == 1) {
+			pr_info("Beaglebone: initializing onboard LEDs");
+			boneleds_init(0,0);
+		}
+		if(beaglebone_spi1_free == 1) {
+			beaglebone_spi1_free = 0;
+			pr_info("BeagleBone cape: exporting SPI pins as spidev\n");
+			setup_pin_mux(spi1_pin_mux);
+			spi_register_board_info(bone_spidev2_info, ARRAY_SIZE(bone_spidev2_info));
+		}
+		if(beaglebone_w1gpio_free == 1) {
+			pr_info("BeagleBone cape: initializing w1-gpio\n");
+			bonew1_gpio_init(0,0);
+		}
+	}
+}
+
+static struct at24_platform_data cape_eeprom_info = {
+        .byte_len       = (256*1024) / 8,
+        .page_size      = 64,
+        .flags          = AT24_FLAG_ADDR16,
+        .context        = (void *)NULL,
+		.setup		  = beaglebone_cape_setup,
+};
+
+static struct i2c_board_info __initdata cape_i2c_boardinfo[] = {
+	{
+		I2C_BOARD_INFO("tlv320aic3x", 0x1b),
+	},
+        {
+                I2C_BOARD_INFO("24c256", 0x54),
+                .platform_data  = &cape_eeprom_info,
+        },
+        {
+                I2C_BOARD_INFO("24c256", 0x55),
+                .platform_data  = &cape_eeprom_info,
+        },
+        {
+                I2C_BOARD_INFO("24c256", 0x56),
+                .platform_data  = &cape_eeprom_info,
+        },
+        {
+                I2C_BOARD_INFO("24c256", 0x57),
+                .platform_data  = &cape_eeprom_info,
+        },
+};
+
+static void i2c2_init(int evm_id, int profile)
+{
+        setup_pin_mux(i2c2_pin_mux);
+        omap_register_i2c_bus(3, 100, cape_i2c_boardinfo,
+                        ARRAY_SIZE(cape_i2c_boardinfo));
+        return;
 }
 
 static void mmc1_init(int evm_id, int profile)
 {
-	setup_pin_mux(mmc1_common_pin_mux);
-	setup_pin_mux(mmc1_dat4_7_pin_mux);
-	setup_pin_mux(mmc1_wp_only_pin_mux);
-	setup_pin_mux(mmc1_cd_only_pin_mux);
+	setup_pin_mux(mmc1_pin_mux);
 
 	am335x_mmc[1].mmc = 2;
 	am335x_mmc[1].caps = MMC_CAP_4_BIT_DATA;
@@ -1626,25 +3502,14 @@ static void mmc1_init(int evm_id, int profile)
 	return;
 }
 
-static void mmc1_wl12xx_init(int evm_id, int profile)
-{
-	setup_pin_mux(mmc1_common_pin_mux);
-	am335x_mmc[1].mmc = 2;
-	am335x_mmc[1].name = "wl1271";
-	am335x_mmc[1].caps = MMC_CAP_4_BIT_DATA | MMC_CAP_POWER_OFF_CARD;
-	am335x_mmc[1].nonremovable = true;
-	am335x_mmc[1].gpio_cd = -EINVAL;
-	am335x_mmc[1].gpio_wp = -EINVAL;
-	am335x_mmc[1].ocr_mask = MMC_VDD_32_33 | MMC_VDD_33_34; /* 3V3 */
-}
-
 static void mmc2_wl12xx_init(int evm_id, int profile)
 {
 	setup_pin_mux(mmc2_wl12xx_pin_mux);
 
 	am335x_mmc[1].mmc = 3;
 	am335x_mmc[1].name = "wl1271";
-	am335x_mmc[1].caps = MMC_CAP_4_BIT_DATA | MMC_CAP_POWER_OFF_CARD;
+	am335x_mmc[1].caps = MMC_CAP_4_BIT_DATA | MMC_CAP_POWER_OFF_CARD
+				| MMC_PM_KEEP_POWER;
 	am335x_mmc[1].nonremovable = true;
 	am335x_mmc[1].gpio_cd = -EINVAL;
 	am335x_mmc[1].gpio_wp = -EINVAL;
@@ -1673,11 +3538,11 @@ static void wl12xx_bluetooth_enable(void)
 static int wl12xx_set_power(struct device *dev, int slot, int on, int vdd)
 {
 	if (on) {
-		gpio_direction_output(am335xevm_wlan_data.wlan_enable_gpio, 1);
+		gpio_set_value(am335xevm_wlan_data.wlan_enable_gpio, 1);
 		mdelay(70);
-	} else {
-		gpio_direction_output(am335xevm_wlan_data.wlan_enable_gpio, 0);
 	}
+	else
+		gpio_set_value(am335xevm_wlan_data.wlan_enable_gpio, 0);
 
 	return 0;
 }
@@ -1688,15 +3553,16 @@ static void wl12xx_init(int evm_id, int profile)
 	struct omap_mmc_platform_data *pdata;
 	int ret;
 
-	if (evm_id == EVM_SK) {
-		am335xevm_wlan_data.wlan_enable_gpio = GPIO_TO_PIN(0, 31);
+	/* Register WLAN and BT enable pins based on the evm board revision */
+	if (gp_evm_revision == GP_EVM_REV_IS_1_1A) {
+		am335xevm_wlan_data.wlan_enable_gpio = GPIO_TO_PIN(1, 16);
 		am335xevm_wlan_data.bt_enable_gpio = GPIO_TO_PIN(3, 21);
-		am335xevm_wlan_data.irq =
-				OMAP_GPIO_IRQ(AM335XEVM_SK_WLAN_IRQ_GPIO);
-		setup_pin_mux(wl12xx_pin_mux_sk);
-	} else {
-		setup_pin_mux(wl12xx_pin_mux);
 	}
+	else {
+		am335xevm_wlan_data.wlan_enable_gpio = GPIO_TO_PIN(1, 30);
+		am335xevm_wlan_data.bt_enable_gpio = GPIO_TO_PIN(1, 31);
+	}
+
 	wl12xx_bluetooth_enable();
 
 	if (wl12xx_set_platform_data(&am335xevm_wlan_data))
@@ -1721,6 +3587,10 @@ static void wl12xx_init(int evm_id, int profile)
 		goto out;
 	}
 
+	if (gp_evm_revision == GP_EVM_REV_IS_1_1A)
+		setup_pin_mux(wl12xx_pin_mux_evm_rev1_1a);
+	else
+		setup_pin_mux(wl12xx_pin_mux_evm_rev1_0);
 
 	pdata->slots[0].set_power = wl12xx_set_power;
 out:
@@ -1738,7 +3608,6 @@ static void d_can_init(int evm_id, int profile)
 		}
 		break;
 	case GEN_PURP_EVM:
-	case GEN_PURP_DDR3_EVM:
 		if (profile == PROFILE_1) {
 			setup_pin_mux(d_can_gp_pin_mux);
 			/* Instance One */
@@ -1748,26 +3617,6 @@ static void d_can_init(int evm_id, int profile)
 	default:
 		break;
 	}
-}
-
-static void mmc0_init(int evm_id, int profile)
-{
-	switch (evm_id) {
-	case BEAGLE_BONE_A3:
-	case BEAGLE_BONE_OLD:
-	case EVM_SK:
-		setup_pin_mux(mmc0_common_pin_mux);
-		setup_pin_mux(mmc0_cd_only_pin_mux);
-		break;
-	default:
-		setup_pin_mux(mmc0_common_pin_mux);
-		setup_pin_mux(mmc0_cd_only_pin_mux);
-		setup_pin_mux(mmc0_wp_only_pin_mux);
-		break;
-	}
-
-	omap2_hsmmc_init(am335x_mmc);
-	return;
 }
 
 static struct i2c_board_info tps65217_i2c_boardinfo[] = {
@@ -1814,12 +3663,12 @@ static void tps65217_init(int evm_id, int profile)
 	if (!(val & TPS65217_STATUS_ACPWR)) {
 		/* If powered by USB then disable OPP120 and OPPTURBO */
 		pr_info("Maximum current provided by the USB port is 500mA"
-			" which is not sufficient\nwhen operating @OPP120 and"
-			" OPPTURBO. The current requirement for some\nuse-cases"
+			" which is not sufficient when operating @OPP120 and"
+			" OPPTURBO. The current requirement for some use-cases"
 			" using OPP100 might also exceed the maximum current"
-			" that the\nUSB port can provide. Unless you are fully"
-			" confident that the current\nrequirements for OPP100"
-			" use-case don't exceed the USB limits, switching\nto"
+			" that the USB port can provide. Unless you are fully"
+			" confident that the current requirements for OPP100"
+			" use-case don't exceed the USB limits, switching to"
 			" AC power is recommended.\n");
 		opp_disable(mpu_dev, 600000000);
 		opp_disable(mpu_dev, 720000000);
@@ -1828,104 +3677,12 @@ static void tps65217_init(int evm_id, int profile)
 
 static void mmc0_no_cd_init(int evm_id, int profile)
 {
-	setup_pin_mux(mmc0_common_pin_mux);
-	setup_pin_mux(mmc0_wp_only_pin_mux);
+	setup_pin_mux(mmc0_no_cd_pin_mux);
 
 	omap2_hsmmc_init(am335x_mmc);
 	return;
 }
 
-/* Configure GPIOs for GPIO Keys */
-static struct gpio_keys_button am335x_evm_gpio_buttons[] = {
-	{
-		.code                   = BTN_0,
-		.gpio                   = GPIO_TO_PIN(2, 3),
-		.desc                   = "SW1",
-	},
-	{
-		.code                   = BTN_1,
-		.gpio                   = GPIO_TO_PIN(2, 2),
-		.desc                   = "SW2",
-	},
-	{
-		.code                   = BTN_2,
-		.gpio                   = GPIO_TO_PIN(0, 30),
-		.desc                   = "SW3",
-		.wakeup                 = 1,
-	},
-	{
-		.code                   = BTN_3,
-		.gpio                   = GPIO_TO_PIN(2, 5),
-		.desc                   = "SW4",
-	},
-};
-
-static struct gpio_keys_platform_data am335x_evm_gpio_key_info = {
-	.buttons        = am335x_evm_gpio_buttons,
-	.nbuttons       = ARRAY_SIZE(am335x_evm_gpio_buttons),
-};
-
-static struct platform_device am335x_evm_gpio_keys = {
-	.name   = "gpio-keys",
-	.id     = -1,
-	.dev    = {
-		.platform_data  = &am335x_evm_gpio_key_info,
-	},
-};
-
-static void gpio_keys_init(int evm_id, int profile)
-{
-	int err;
-
-	setup_pin_mux(gpio_keys_pin_mux);
-	err = platform_device_register(&am335x_evm_gpio_keys);
-	if (err)
-		pr_err("failed to register gpio key device\n");
-}
-
-static struct gpio_led gpio_leds[] = {
-	{
-		.name			= "am335x:EVM_SK:usr0",
-		.gpio			= GPIO_TO_PIN(1, 4),	/* D1 */
-	},
-	{
-		.name			= "am335x:EVM_SK:usr1",
-		.gpio			= GPIO_TO_PIN(1, 5),	/* D2 */
-	},
-	{
-		.name			= "am335x:EVM_SK:mmc0",
-		.gpio			= GPIO_TO_PIN(1, 7),	/* D3 */
-		.default_trigger	= "mmc0",
-	},
-	{
-		.name			= "am335x:EVM_SK:heartbeat",
-		.gpio			= GPIO_TO_PIN(1, 6),	/* D4 */
-		.default_trigger	= "heartbeat",
-	},
-};
-
-static struct gpio_led_platform_data gpio_led_info = {
-	.leds		= gpio_leds,
-	.num_leds	= ARRAY_SIZE(gpio_leds),
-};
-
-static struct platform_device leds_gpio = {
-	.name	= "leds-gpio",
-	.id	= -1,
-	.dev	= {
-		.platform_data	= &gpio_led_info,
-	},
-};
-
-static void gpio_led_init(int evm_id, int profile)
-{
-	int err;
-
-	setup_pin_mux(gpio_led_mux);
-	err = platform_device_register(&leds_gpio);
-	if (err)
-		pr_err("failed to register gpio led device\n");
-}
 
 /* setup spi0 */
 static void spi0_init(int evm_id, int profile)
@@ -1945,7 +3702,6 @@ static void spi1_init(int evm_id, int profile)
 	return;
 }
 
-
 static int beaglebone_phy_fixup(struct phy_device *phydev)
 {
 	phydev->supported &= ~(SUPPORTED_100baseT_Half |
@@ -1954,112 +3710,87 @@ static int beaglebone_phy_fixup(struct phy_device *phydev)
 	return 0;
 }
 
+#if defined(CONFIG_TLK110_WORKAROUND) || \
+			defined(CONFIG_TLK110_WORKAROUND_MODULE)
+static int am335x_tlk110_phy_fixup(struct phy_device *phydev)
+{
+	unsigned int val;
+
+	/* This is done as a workaround to support TLK110 rev1.0 phy */
+	val = phy_read(phydev, TLK110_COARSEGAIN_REG);
+	phy_write(phydev, TLK110_COARSEGAIN_REG, (val | TLK110_COARSEGAIN_VAL));
+
+	val = phy_read(phydev, TLK110_LPFHPF_REG);
+	phy_write(phydev, TLK110_LPFHPF_REG, (val | TLK110_LPFHPF_VAL));
+
+	val = phy_read(phydev, TLK110_SPAREANALOG_REG);
+	phy_write(phydev, TLK110_SPAREANALOG_REG, (val | TLK110_SPANALOG_VAL));
+
+	val = phy_read(phydev, TLK110_VRCR_REG);
+	phy_write(phydev, TLK110_VRCR_REG, (val | TLK110_VRCR_VAL));
+
+	val = phy_read(phydev, TLK110_SETFFE_REG);
+	phy_write(phydev, TLK110_SETFFE_REG, (val | TLK110_SETFFE_VAL));
+
+	val = phy_read(phydev, TLK110_FTSP_REG);
+	phy_write(phydev, TLK110_FTSP_REG, (val | TLK110_FTSP_VAL));
+
+	val = phy_read(phydev, TLK110_ALFATPIDL_REG);
+	phy_write(phydev, TLK110_ALFATPIDL_REG, (val | TLK110_ALFATPIDL_VAL));
+
+	val = phy_read(phydev, TLK110_PSCOEF21_REG);
+	phy_write(phydev, TLK110_PSCOEF21_REG, (val | TLK110_PSCOEF21_VAL));
+
+	val = phy_read(phydev, TLK110_PSCOEF3_REG);
+	phy_write(phydev, TLK110_PSCOEF3_REG, (val | TLK110_PSCOEF3_VAL));
+
+	val = phy_read(phydev, TLK110_ALFAFACTOR1_REG);
+	phy_write(phydev, TLK110_ALFAFACTOR1_REG, (val | TLK110_ALFACTOR1_VAL));
+
+	val = phy_read(phydev, TLK110_ALFAFACTOR2_REG);
+	phy_write(phydev, TLK110_ALFAFACTOR2_REG, (val | TLK110_ALFACTOR2_VAL));
+
+	val = phy_read(phydev, TLK110_CFGPS_REG);
+	phy_write(phydev, TLK110_CFGPS_REG, (val | TLK110_CFGPS_VAL));
+
+	val = phy_read(phydev, TLK110_FTSPTXGAIN_REG);
+	phy_write(phydev, TLK110_FTSPTXGAIN_REG, (val | TLK110_FTSPTXGAIN_VAL));
+
+	val = phy_read(phydev, TLK110_SWSCR3_REG);
+	phy_write(phydev, TLK110_SWSCR3_REG, (val | TLK110_SWSCR3_VAL));
+
+	val = phy_read(phydev, TLK110_SCFALLBACK_REG);
+	phy_write(phydev, TLK110_SCFALLBACK_REG, (val | TLK110_SCFALLBACK_VAL));
+
+	val = phy_read(phydev, TLK110_PHYRCR_REG);
+	phy_write(phydev, TLK110_PHYRCR_REG, (val | TLK110_PHYRCR_VAL));
+
+	return 0;
+}
+#endif
+
 static void profibus_init(int evm_id, int profile)
 {
 	setup_pin_mux(profibus_pin_mux);
 	return;
 }
 
-static struct omap_rtc_pdata am335x_rtc_info = {
-	.pm_off		= false,
-	.wakeup_capable	= 0,
+/* Low-Cost EVM */
+static struct evm_dev_cfg low_cost_evm_dev_cfg[] = {
+	{rgmii1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{usb0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{usb1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{evm_nand_init, DEV_ON_BASEBOARD, PROFILE_NONE},
+	{NULL, 0, 0},
 };
-
-static void am335x_rtc_init(int evm_id, int profile)
-{
-	void __iomem *base;
-	struct clk *clk;
-	struct omap_hwmod *oh;
-	struct platform_device *pdev;
-	char *dev_name = "am33xx-rtc";
-
-	clk = clk_get(NULL, "rtc_fck");
-	if (IS_ERR(clk)) {
-		pr_err("rtc : Failed to get RTC clock\n");
-		return;
-	}
-
-	if (clk_enable(clk)) {
-		pr_err("rtc: Clock Enable Failed\n");
-		return;
-	}
-
-	base = ioremap(AM33XX_RTC_BASE, SZ_4K);
-
-	if (WARN_ON(!base))
-		return;
-
-	/* Unlock the rtc's registers */
-	writel(0x83e70b13, base + 0x6c);
-	writel(0x95a4f1e0, base + 0x70);
-
-	/*
-	 * Enable the 32K OSc
-	 * TODO: Need a better way to handle this
-	 * Since we want the clock to be running before mmc init
-	 * we need to do it before the rtc probe happens
-	 */
-	writel(0x48, base + 0x54);
-
-	iounmap(base);
-
-	switch (evm_id) {
-	case BEAGLE_BONE_A3:
-	case BEAGLE_BONE_OLD:
-		am335x_rtc_info.pm_off = true;
-		break;
-	default:
-		break;
-	}
-
-	clk_disable(clk);
-	clk_put(clk);
-
-	if (omap_rev() == AM335X_REV_ES2_0)
-		am335x_rtc_info.wakeup_capable = 1;
-
-	oh = omap_hwmod_lookup("rtc");
-	if (!oh) {
-		pr_err("could not look up %s\n", "rtc");
-		return;
-	}
-
-	pdev = omap_device_build(dev_name, -1, oh, &am335x_rtc_info,
-			sizeof(struct omap_rtc_pdata), NULL, 0, 0);
-	WARN(IS_ERR(pdev), "Can't build omap_device for %s:%s.\n",
-			dev_name, oh->name);
-}
-
-/* Enable clkout2 */
-static struct pinmux_config clkout2_pin_mux[] = {
-	{"xdma_event_intr1.clkout2", OMAP_MUX_MODE3 | AM33XX_PIN_OUTPUT},
-	{NULL, 0},
-};
-
-static void clkout2_enable(int evm_id, int profile)
-{
-	struct clk *ck_32;
-
-	ck_32 = clk_get(NULL, "clkout2_ck");
-	if (IS_ERR(ck_32)) {
-		pr_err("Cannot clk_get ck_32\n");
-		return;
-	}
-
-	clk_enable(ck_32);
-
-	setup_pin_mux(clkout2_pin_mux);
-}
 
 /* General Purpose EVM */
 static struct evm_dev_cfg gen_purp_evm_dev_cfg[] = {
-	{am335x_rtc_init, DEV_ON_BASEBOARD, PROFILE_ALL},
-	{clkout2_enable, DEV_ON_BASEBOARD, PROFILE_ALL},
 	{enable_ecap0,	DEV_ON_DGHTR_BRD, (PROFILE_0 | PROFILE_1 |
 						PROFILE_2 | PROFILE_7) },
 	{lcdc_init,	DEV_ON_DGHTR_BRD, (PROFILE_0 | PROFILE_1 |
 						PROFILE_2 | PROFILE_7) },
-	{mfd_tscadc_init,	DEV_ON_DGHTR_BRD, (PROFILE_0 | PROFILE_1 |
+	{tsc_init,	DEV_ON_DGHTR_BRD, (PROFILE_0 | PROFILE_1 |
 						PROFILE_2 | PROFILE_7) },
 	{rgmii1_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
 	{rgmii2_init,	DEV_ON_DGHTR_BRD, (PROFILE_1 | PROFILE_2 |
@@ -2069,7 +3800,6 @@ static struct evm_dev_cfg gen_purp_evm_dev_cfg[] = {
 	{evm_nand_init, DEV_ON_DGHTR_BRD,
 		(PROFILE_ALL & ~PROFILE_2 & ~PROFILE_3)},
 	{i2c1_init,     DEV_ON_DGHTR_BRD, (PROFILE_ALL & ~PROFILE_2)},
-	{lis331dlh_init, DEV_ON_DGHTR_BRD, (PROFILE_ALL & ~PROFILE_2)},
 	{mcasp1_init,	DEV_ON_DGHTR_BRD, (PROFILE_0 | PROFILE_3 | PROFILE_7)},
 	{mmc1_init,	DEV_ON_DGHTR_BRD, PROFILE_2},
 	{mmc2_wl12xx_init,	DEV_ON_BASEBOARD, (PROFILE_0 | PROFILE_3 |
@@ -2090,8 +3820,6 @@ static struct evm_dev_cfg gen_purp_evm_dev_cfg[] = {
 
 /* Industrial Auto Motor Control EVM */
 static struct evm_dev_cfg ind_auto_mtrl_evm_dev_cfg[] = {
-	{am335x_rtc_init, DEV_ON_BASEBOARD, PROFILE_ALL},
-	{clkout2_enable, DEV_ON_BASEBOARD, PROFILE_ALL},
 	{mii1_init,	DEV_ON_DGHTR_BRD, PROFILE_ALL},
 	{usb0_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
 	{usb1_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
@@ -2104,78 +3832,71 @@ static struct evm_dev_cfg ind_auto_mtrl_evm_dev_cfg[] = {
 	{NULL, 0, 0},
 };
 
+/* IP-Phone EVM */
+static struct evm_dev_cfg ip_phn_evm_dev_cfg[] = {
+	{enable_ecap0,	DEV_ON_DGHTR_BRD, PROFILE_NONE},
+	{lcdc_init,	DEV_ON_DGHTR_BRD, PROFILE_NONE},
+	{tsc_init,	DEV_ON_DGHTR_BRD, PROFILE_NONE},
+	{rgmii1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{rgmii2_init,	DEV_ON_DGHTR_BRD, PROFILE_NONE},
+	{usb0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{usb1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{evm_nand_init, DEV_ON_DGHTR_BRD, PROFILE_NONE},
+	{i2c1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{mcasp1_init,	DEV_ON_DGHTR_BRD, PROFILE_NONE},
+	{mmc0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{NULL, 0, 0},
+};
+
 /* Beaglebone < Rev A3 */
 static struct evm_dev_cfg beaglebone_old_dev_cfg[] = {
-	{am335x_rtc_init, DEV_ON_BASEBOARD, PROFILE_NONE},
-	{clkout2_enable, DEV_ON_BASEBOARD, PROFILE_NONE},
 	{rmii1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
 	{usb0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
 	{usb1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
-	{mmc0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
 	{i2c2_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{mmc0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{boneleds_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
 	{NULL, 0, 0},
 };
 
 /* Beaglebone Rev A3 and after */
 static struct evm_dev_cfg beaglebone_dev_cfg[] = {
-	{am335x_rtc_init, DEV_ON_BASEBOARD, PROFILE_NONE},
-	{clkout2_enable, DEV_ON_BASEBOARD, PROFILE_NONE},
 	{tps65217_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
+	{i2c2_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
 	{mii1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
 	{usb0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
 	{usb1_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
-	{mmc0_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
-	{i2c2_init,	DEV_ON_BASEBOARD, PROFILE_NONE},
 	{NULL, 0, 0},
 };
 
-/* EVM - Starter Kit */
-static struct evm_dev_cfg evm_sk_dev_cfg[] = {
-	{am335x_rtc_init, DEV_ON_BASEBOARD, PROFILE_ALL},
-	{mmc1_wl12xx_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
-	{mmc0_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
-	{rgmii1_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
-	{rgmii2_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
-	{lcdc_init,     DEV_ON_BASEBOARD, PROFILE_ALL},
-	{enable_ecap2,     DEV_ON_BASEBOARD, PROFILE_ALL},
-	{mfd_tscadc_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
-	{gpio_keys_init,  DEV_ON_BASEBOARD, PROFILE_ALL},
-	{gpio_led_init,  DEV_ON_BASEBOARD, PROFILE_ALL},
-	{lis331dlh_init, DEV_ON_BASEBOARD, PROFILE_ALL},
-	{mcasp1_init,   DEV_ON_BASEBOARD, PROFILE_ALL},
-	{uart1_wl12xx_init, DEV_ON_BASEBOARD, PROFILE_ALL},
-	{wl12xx_init,       DEV_ON_BASEBOARD, PROFILE_ALL},
-	{gpio_ddr_vtt_enb_init,	DEV_ON_BASEBOARD, PROFILE_ALL},
-	{NULL, 0, 0},
-};
-
-static int am33xx_evm_tx_clk_dly_phy_fixup(struct phy_device *phydev)
+static void setup_low_cost_evm(void)
 {
-	phy_write(phydev, AR8051_PHY_DEBUG_ADDR_REG,
-		  AR8051_DEBUG_RGMII_CLK_DLY_REG);
-	phy_write(phydev, AR8051_PHY_DEBUG_DATA_REG, AR8051_RGMII_TX_CLK_DLY);
+	pr_info("The board is a AM335x Low Cost EVM.\n");
 
-	return 0;
+	_configure_device(LOW_COST_EVM, low_cost_evm_dev_cfg, PROFILE_NONE);
 }
 
 static void setup_general_purpose_evm(void)
 {
 	u32 prof_sel = am335x_get_profile_selection();
-	u32 boardid = GEN_PURP_EVM;
+	pr_info("The board is general purpose EVM in profile %d\n", prof_sel);
 
-	if (!strncmp("1.5A", config.version, 4))
-		boardid = GEN_PURP_DDR3_EVM;
+	if (!strncmp("1.1A", config.version, 4)) {
+		pr_info("EVM version is %s\n", config.version);
+		gp_evm_revision = GP_EVM_REV_IS_1_1A;
+	} else if (!strncmp("1.0", config.version, 3)) {
+		gp_evm_revision = GP_EVM_REV_IS_1_0;
+	} else {
+		pr_err("Found invalid GP EVM revision, falling back to Rev1.1A");
+		gp_evm_revision = GP_EVM_REV_IS_1_1A;
+	}
 
-	pr_info("The board is general purpose EVM %sin profile %d\n",
-			((boardid == GEN_PURP_DDR3_EVM) ? "with DDR3 " : ""),
-			prof_sel);
+	if (gp_evm_revision == GP_EVM_REV_IS_1_0)
+		gigabit_enable = 0;
+	else if (gp_evm_revision == GP_EVM_REV_IS_1_1A)
+		gigabit_enable = 1;
 
-	_configure_device(boardid, gen_purp_evm_dev_cfg, (1L << prof_sel));
-
-	am33xx_cpsw_init(AM33XX_CPSW_MODE_RGMII, NULL, NULL);
-	/* Atheros Tx Clk delay Phy fixup */
-	phy_register_fixup_for_uid(AM335X_EVM_PHY_ID, AM335X_EVM_PHY_MASK,
-				   am33xx_evm_tx_clk_dly_phy_fixup);
+	_configure_device(GEN_PURP_EVM, gen_purp_evm_dev_cfg, (1L << prof_sel));
 }
 
 static void setup_ind_auto_motor_ctrl_evm(void)
@@ -2195,7 +3916,20 @@ static void setup_ind_auto_motor_ctrl_evm(void)
 	_configure_device(IND_AUT_MTR_EVM, ind_auto_mtrl_evm_dev_cfg,
 		PROFILE_0);
 
-	am33xx_cpsw_init(AM33XX_CPSW_MODE_MII, "0:1e", "0:00");
+	/* Fillup global evmid */
+	am33xx_evmid_fillup(IND_AUT_MTR_EVM);
+
+	/* Initialize TLK110 PHY registers for phy version 1.0 */
+	am335x_tlk110_phy_init();
+
+
+}
+
+static void setup_ip_phone_evm(void)
+{
+	pr_info("The board is an IP phone EVM\n");
+
+	_configure_device(IP_PHN_EVM, ip_phn_evm_dev_cfg, PROFILE_NONE);
 }
 
 /* BeagleBone < Rev A3 */
@@ -2206,46 +3940,38 @@ static void setup_beaglebone_old(void)
 	/* Beagle Bone has Micro-SD slot which doesn't have Write Protect pin */
 	am335x_mmc[0].gpio_wp = -EINVAL;
 
-	_configure_device(BEAGLE_BONE_OLD, beaglebone_old_dev_cfg,
-								PROFILE_NONE);
+	_configure_device(LOW_COST_EVM, beaglebone_old_dev_cfg, PROFILE_NONE);
 
 	phy_register_fixup_for_uid(BBB_PHY_ID, BBB_PHY_MASK,
 					beaglebone_phy_fixup);
 
-	am33xx_cpsw_init(AM33XX_CPSW_MODE_RMII, NULL, NULL);
+	/* Fill up global evmid */
+	am33xx_evmid_fillup(BEAGLE_BONE_OLD);
 }
 
 /* BeagleBone after Rev A3 */
 static void setup_beaglebone(void)
 {
 	pr_info("The board is a AM335x Beaglebone.\n");
+	gp_evm_revision = GP_EVM_ACTUALLY_BEAGLEBONE;
 
 	/* Beagle Bone has Micro-SD slot which doesn't have Write Protect pin */
 	am335x_mmc[0].gpio_wp = -EINVAL;
 
-	_configure_device(BEAGLE_BONE_A3, beaglebone_dev_cfg, PROFILE_NONE);
+	_configure_device(LOW_COST_EVM, beaglebone_dev_cfg, PROFILE_NONE);
 
 	/* TPS65217 regulator has full constraints */
 	regulator_has_full_constraints();
 
-	am33xx_cpsw_init(AM33XX_CPSW_MODE_MII, NULL, NULL);
+	/* Fill up global evmid */
+	am33xx_evmid_fillup(BEAGLE_BONE_A3);
+
+	/*TODO:We are registering all pwms for the beaglebone here
+	 *this may effect power management in the future
+	 */
+	register_all_pwms();
 }
 
-/* EVM - Starter Kit */
-static void setup_starterkit(void)
-{
-	pr_info("The board is a AM335x Starter Kit.\n");
-
-	/* Starter Kit has Micro-SD slot which doesn't have Write Protect pin */
-	am335x_mmc[0].gpio_wp = -EINVAL;
-
-	_configure_device(EVM_SK, evm_sk_dev_cfg, PROFILE_NONE);
-
-	am33xx_cpsw_init(AM33XX_CPSW_MODE_RGMII, NULL, NULL);
-	/* Atheros Tx Clk delay Phy fixup */
-	phy_register_fixup_for_uid(AM335X_EVM_PHY_ID, AM335X_EVM_PHY_MASK,
-				   am33xx_evm_tx_clk_dly_phy_fixup);
-}
 
 static void am335x_setup_daughter_board(struct memory_accessor *m, void *c)
 {
@@ -2323,21 +4049,27 @@ static void am335x_evm_setup(struct memory_accessor *mem_acc, void *context)
 			setup_beaglebone_old();
 		else
 			setup_beaglebone();
-	} else if (!strncmp("A335X_SK", config.name, 8)) {
-		daughter_brd_detected = false;
-		setup_starterkit();
 	} else {
 		/* only 6 characters of options string used for now */
 		snprintf(tmp, 7, "%s", config.opt);
 		pr_info("SKU: %s\n", tmp);
 
-		if (!strncmp("SKU#01", config.opt, 6))
+		if (!strncmp("SKU#00", config.opt, 6))
+			setup_low_cost_evm();
+		else if (!strncmp("SKU#01", config.opt, 6))
 			setup_general_purpose_evm();
 		else if (!strncmp("SKU#02", config.opt, 6))
 			setup_ind_auto_motor_ctrl_evm();
+		else if (!strncmp("SKU#03", config.opt, 6))
+			setup_ip_phone_evm();
 		else
 			goto out;
 	}
+	/* Initialize cpsw after board detection is completed as board
+	 * information is required for configuring phy address and hence
+	 * should be call only after board detection
+	 */
+	am33xx_cpsw_init(gigabit_enable);
 
 	return;
 
@@ -2433,7 +4165,7 @@ static struct tps65910_board am335x_tps65910_info = {
 *	   the below struct. Daughter boards eeprom are probed 1st. Baseboard
 *	   eeprom probe is called last.
 */
-static struct i2c_board_info __initdata am335x_i2c0_boardinfo[] = {
+static struct i2c_board_info __initdata am335x_i2c_boardinfo[] = {
 	{
 		/* Daughter Board EEPROM */
 		I2C_BOARD_INFO("24c256", DAUG_BOARD_I2C_ADDR),
@@ -2453,9 +4185,6 @@ static struct i2c_board_info __initdata am335x_i2c0_boardinfo[] = {
 	{
 		I2C_BOARD_INFO("tps65910", TPS65910_I2C_ID1),
 		.platform_data  = &am335x_tps65910_info,
-	},
-	{
-		I2C_BOARD_INFO("tlv320aic3x", 0x1b),
 	},
 };
 
@@ -2505,13 +4234,95 @@ static void evm_init_cpld(void)
 
 static void __init am335x_evm_i2c_init(void)
 {
-	/* Initially assume General Purpose EVM Config */
-	am335x_evm_id = GEN_PURP_EVM;
+	/* Initially assume Low Cost EVM Config */
+	am335x_evm_id = LOW_COST_EVM;
 
 	evm_init_cpld();
 
-	omap_register_i2c_bus(1, 100, am335x_i2c0_boardinfo,
-				ARRAY_SIZE(am335x_i2c0_boardinfo));
+	omap_register_i2c_bus(1, 100, am335x_i2c_boardinfo,
+				ARRAY_SIZE(am335x_i2c_boardinfo));
+}
+
+static struct resource am335x_rtc_resources[] = {
+	{
+		.start		= AM33XX_RTC_BASE,
+		.end		= AM33XX_RTC_BASE + SZ_4K - 1,
+		.flags		= IORESOURCE_MEM,
+	},
+	{ /* timer irq */
+		.start		= AM33XX_IRQ_RTC_TIMER,
+		.end		= AM33XX_IRQ_RTC_TIMER,
+		.flags		= IORESOURCE_IRQ,
+	},
+	{ /* alarm irq */
+		.start		= AM33XX_IRQ_RTC_ALARM,
+		.end		= AM33XX_IRQ_RTC_ALARM,
+		.flags		= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device am335x_rtc_device = {
+	.name           = "omap_rtc",
+	.id             = -1,
+	.num_resources	= ARRAY_SIZE(am335x_rtc_resources),
+	.resource	= am335x_rtc_resources,
+};
+
+static int am335x_rtc_init(void)
+{
+	void __iomem *base;
+	struct clk *clk;
+
+	clk = clk_get(NULL, "rtc_fck");
+	if (IS_ERR(clk)) {
+		pr_err("rtc : Failed to get RTC clock\n");
+		return -1;
+	}
+
+	if (clk_enable(clk)) {
+		pr_err("rtc: Clock Enable Failed\n");
+		return -1;
+	}
+
+	base = ioremap(AM33XX_RTC_BASE, SZ_4K);
+
+	if (WARN_ON(!base))
+		return -ENOMEM;
+
+	/* Unlock the rtc's registers */
+	writel(0x83e70b13, base + 0x6c);
+	writel(0x95a4f1e0, base + 0x70);
+
+	/*
+	 * Enable the 32K OSc
+	 * TODO: Need a better way to handle this
+	 * Since we want the clock to be running before mmc init
+	 * we need to do it before the rtc probe happens
+	 */
+	writel(0x48, base + 0x54);
+
+	iounmap(base);
+
+	return  platform_device_register(&am335x_rtc_device);
+}
+
+/* Enable clkout2 */
+static struct pinmux_config clkout2_pin_mux[] = {
+	{"xdma_event_intr1.clkout2", OMAP_MUX_MODE3 | AM33XX_PIN_OUTPUT},
+	{NULL, 0},
+};
+
+static void __init clkout2_enable(void)
+{
+	void __iomem *base;
+	unsigned int val;
+
+	base = ioremap(0x44E00700, SZ_4K);
+	val = (5 << 3) | (3 << 0); //32 MHz
+	writel(val, base);
+	iounmap(base);
+
+	setup_pin_mux(clkout2_pin_mux);
 }
 
 void __iomem *am33xx_emif_base;
@@ -2530,15 +4341,6 @@ void __iomem * __init am33xx_get_mem_ctlr(void)
 void __iomem *am33xx_get_ram_base(void)
 {
 	return am33xx_emif_base;
-}
-
-void __iomem *am33xx_gpio0_base;
-
-void __iomem *am33xx_get_gpio0_base(void)
-{
-	am33xx_gpio0_base = ioremap(AM33XX_GPIO0_BASE, SZ_4K);
-
-	return am33xx_gpio0_base;
 }
 
 static struct resource am33xx_cpuidle_resources[] = {
@@ -2581,6 +4383,8 @@ static void __init am335x_evm_init(void)
 	am33xx_cpuidle_init();
 	am33xx_mux_init(board_mux);
 	omap_serial_init();
+	am335x_rtc_init();
+	clkout2_enable();
 	am335x_evm_i2c_init();
 	omap_sdrc_init(NULL, NULL);
 	usb_musb_init(&musb_board_data);

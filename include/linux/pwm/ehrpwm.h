@@ -25,10 +25,12 @@ struct ehrpwm_context {
 	u32 hrcfg;
 	u32 aqctla;
 	u32 aqctlb;
-	u32 aqsfrc;
-	u32 aqcsfrc;
 	u32 cmpa;
 	u32 cmpb;
+	u32 tzctl;
+	u32 tzflg;
+	u32 tzclr;
+	u32 tzfrc;
 };
 
 struct ehrpwm_pwm {

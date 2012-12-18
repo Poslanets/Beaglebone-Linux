@@ -52,7 +52,7 @@
 
 #include "tlv320aic3x.h"
 
-#define AIC3X_NUM_SUPPLIES	4
+#define AIC3X_NUM_SUPPLIES	0
 static const char *aic3x_supply_names[AIC3X_NUM_SUPPLIES] = {
 	"IOVDD",	/* I/O Voltage */
 	"DVDD",		/* Digital Core Voltage */
@@ -963,9 +963,7 @@ static int aic3x_hw_params(struct snd_pcm_substream *substream,
 	}
 
 found:
-	data = snd_soc_read(codec, AIC3X_PLL_PROGA_REG) & ~PLLP_MASK;
-	snd_soc_write(codec, AIC3X_PLL_PROGA_REG,
-		      data | (pll_p << PLLP_SHIFT));
+	snd_soc_update_bits(codec, AIC3X_PLL_PROGA_REG, PLLP_MASK, pll_p);
 	snd_soc_write(codec, AIC3X_OVRF_STATUS_AND_PLLR_REG,
 		      pll_r << PLLR_SHIFT);
 	snd_soc_write(codec, AIC3X_PLL_PROGB_REG, pll_j << PLLJ_SHIFT);

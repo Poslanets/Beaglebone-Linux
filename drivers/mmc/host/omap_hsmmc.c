@@ -1554,6 +1554,9 @@ static void set_data_timeout(struct omap_hsmmc_host *host)
 	/* Use the maximum timeout value allowed in the standard of 14 or 0xE */
 	dto = 14;
 
+	/* Set dto to max value of 14 to avoid SD Card timeouts */
+	dto = 14;
+
 	reg &= ~DTO_MASK;
 	reg |= dto << DTO_SHIFT;
 	OMAP_HSMMC_WRITE(host->base, SYSCTL, reg);
@@ -2244,9 +2247,7 @@ static int omap_hsmmc_suspend(struct device *dev)
 		if (ret) {
 			host->suspended = 0;
 			if (host->pdata->resume) {
-				ret = host->pdata->resume(&pdev->dev,
-							  host->slot_id);
-				if (ret)
+				if (host->pdata->resume(&pdev->dev, host->slot_id))
 					dev_dbg(mmc_dev(host->mmc),
 						"Unmask interrupt failed\n");
 			}
