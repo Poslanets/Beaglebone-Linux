@@ -2465,6 +2465,7 @@ static struct spi_board_info am335x_spi1_slave_info[] = {
 	},
 };
 
+#if 0 /* Watchfrog: use adcxx on spi2 */
 static struct spi_board_info bone_spidev2_info[] = {
 	{
 		.modalias      = "spidev",
@@ -2474,6 +2475,18 @@ static struct spi_board_info bone_spidev2_info[] = {
 		.chip_select   = 0,
 	},
 };
+#else
+static struct spi_board_info bone_spidev2_info[] = {
+	{
+		.modalias      = "adcxx",
+		.irq           = -1,
+		.max_speed_hz  = 12000000,
+		.bus_num       = 2,
+		.mode          = SPI_MODE_3,
+		.chip_select   = 0,
+	},
+};
+#endif
 
 static struct gpmc_timings am335x_nand_timings = {
 	.sync_clk = 0,

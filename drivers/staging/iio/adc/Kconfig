@@ -193,4 +193,15 @@ config MAX1363_RING_BUFFER
 	  Say yes here to include ring buffer support in the MAX1363
 	  ADC driver.
 
+config ADC122S101
+	tristate "Texas Instruments ADC122S101 ADC driver"
+	depends on SPI
+	help
+	  Say yes here to build support for Texas Instruments
+	  ADC122S101 SPI analog to digital converter (ADC).
+	  If unsure, say N (but it's safe to say "Y").
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called adcxx.
+
 endmenu
