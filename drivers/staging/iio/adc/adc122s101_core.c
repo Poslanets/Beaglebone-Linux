@@ -1,5 +1,5 @@
 /*
- * adcxx SPI ADC driver
+ * adc122s101 SPI ADC driver
  *
  * Copyright 2012 WatchFrog Inc.
  *
@@ -30,9 +30,9 @@
 #include "../trigger_consumer.h"
 #endif
 
-#include "adcxx.h"
+#include "adc122s101.h"
 
-static int adcxx_scan_direct(struct adcxx_state *st, unsigned ch)
+static int adc122s101_scan_direct(struct adc122s101_state *st, unsigned ch)
 {
 	int ret;
 	
@@ -41,32 +41,38 @@ static int adcxx_scan_direct(struct adcxx_state *st, unsigned ch)
 	if (ret)
 		return ret;
 
+	printk("%s data: %02hhX %02hhX %02hhX %02hhX\n", __func__,
+		st->data[0], st->data[1], st->data[2], st->data[3]);
 	return (st->data[(ch * 2)] << 8) | st->data[(ch * 2) + 1];
 }
 
-static int adcxx_read_raw(struct iio_dev *indio_dev,
+static int adc122s101_read_raw(struct iio_dev *indio_dev,
 			   struct iio_chan_spec const *chan,
 			   int *val,
 			   int *val2,
 			   long m)
 {
 	int ret;
-	struct adcxx_state *st = iio_priv(indio_dev);
+	struct adc122s101_state *st = iio_priv(indio_dev);
 	unsigned int scale_uv;
 
-	printk("%s channel %d, address %ld\n", __func__, chan->channel, chan->address);
+	printk("%s channel %d, address %ld, m %ld\n", __func__, chan->channel, chan->address, m);
 	switch (m) {
 	case 0:
 		mutex_lock(&indio_dev->mlock);
 #ifdef CONFIG_IIO_BUFFER
 		if (iio_buffer_enabled(indio_dev))
-			ret = adcxx_scan_from_ring(st, 1 << chan->address);
+			ret = adc122s101_scan_from_ring(st, 1 << chan->address);
 		else
-			ret = adcxx_scan_direct(st, chan->address);
+			ret = adc122s101_scan_direct(st, chan->address);
 #else
-		ret = adcxx_scan_direct(st, chan->address);
+		ret = adc122s101_scan_direct(st, chan->address);
 #endif
 		mutex_unlock(&indio_dev->mlock);
+
+		printk("%s ret: %d, shift %d, realbits %d\n", __func__, ret, 
+			st->chip_info->channel[0].scan_type.shift,
+			st->chip_info->channel[0].scan_type.realbits);
 
 		if (ret < 0)
 			return ret;
@@ -74,21 +80,26 @@ static int adcxx_read_raw(struct iio_dev *indio_dev,
 			RES_MASK(st->chip_info->channel[0].scan_type.realbits);
 		return IIO_VAL_INT;
 	case (1 << IIO_CHAN_INFO_SCALE_SHARED):
+
 		scale_uv = (st->int_vref_mv * 1000)
 			>> st->chip_info->channel[0].scan_type.realbits;
 		*val =  scale_uv/1000;
 		*val2 = (scale_uv%1000)*1000;
+		printk("%s vref %d, realbits %d, scale_uv %d\n", __func__,
+			st->int_vref_mv,
+			st->chip_info->channel[0].scan_type.realbits,
+			scale_uv);
 		return IIO_VAL_INT_PLUS_MICRO;
 	}
 	return -EINVAL;
 }
 
 
-static const struct adcxx_chip_info adcxx_chip_info_tbl[] = {
+static const struct adc122s101_chip_info adc122s101_chip_info_tbl[] = {
 	/*
 	 * More devices added in future
 	 */
-	[ID_ADCXX] = {
+	[ID_ADC122S101] = {
 		.channel[0] = {
 			.type = IIO_VOLTAGE,
 			.indexed = 1,
@@ -103,7 +114,7 @@ static const struct adcxx_chip_info adcxx_chip_info_tbl[] = {
 			.indexed = 1,
 			.channel = 1,
 			.info_mask = (1 << IIO_CHAN_INFO_SCALE_SHARED),
-			.address = 1 << 3,
+			.address = 1,
 			.scan_index = 1,
 			.scan_type = IIO_ST('u', 12, 16, 0),
 		},
@@ -112,15 +123,15 @@ static const struct adcxx_chip_info adcxx_chip_info_tbl[] = {
 	},
 };
 
-static const struct iio_info adcxx_info = {
-	.read_raw = &adcxx_read_raw,
+static const struct iio_info adc122s101_info = {
+	.read_raw = &adc122s101_read_raw,
 	.driver_module = THIS_MODULE,
 };
 
-static int __devinit adcxx_probe(struct spi_device *spi)
+static int __devinit adc122s101_probe(struct spi_device *spi)
 {
-	struct adcxx_platform_data *pdata = spi->dev.platform_data;
-	struct adcxx_state *st;
+	struct adc122s101_platform_data *pdata = spi->dev.platform_data;
+	struct adc122s101_state *st;
 	int ret, voltage_uv = 0;
 	struct iio_dev *indio_dev = iio_allocate_device(sizeof(*st));
 
@@ -142,10 +153,10 @@ static int __devinit adcxx_probe(struct spi_device *spi)
 		voltage_uv = regulator_get_voltage(st->reg);
 	}
 #else
-	voltage_uv = 3300;
+	voltage_uv = 3300000;
 #endif
 	st->chip_info =
-		&adcxx_chip_info_tbl[spi_get_device_id(spi)->driver_data];
+		&adc122s101_chip_info_tbl[spi_get_device_id(spi)->driver_data];
 
 	spi_set_drvdata(spi, indio_dev);
 	st->spi = spi;
@@ -153,42 +164,48 @@ static int __devinit adcxx_probe(struct spi_device *spi)
 	/* Estabilish that the iio_dev is a child of the spi device */
 	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
-	indio_dev->info = &adcxx_info;
+	indio_dev->info = &adc122s101_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	/* Setup message to read ch0 */
 
-	st->tx_cmd_buf[0] = ADCXX_CH_AIN0;
+	st->tx_cmd_buf[0] = ADC122S101_CH_AIN0;
 
 	st->xfer[0].rx_buf = &st->data[0];
 	st->xfer[0].tx_buf = &st->tx_cmd_buf[0];
 	st->xfer[0].len = 2;
 
-	spi_message_init(&st->msg[ADCXX_CH0]);
-	spi_message_add_tail(&st->xfer[0], &st->msg[ADCXX_CH0]);
+	spi_message_init(&st->msg[0]);
+	spi_message_add_tail(&st->xfer[0], &st->msg[0]);
 
 	/* Setup message to read ch1 */
 
-	st->tx_cmd_buf[2] = ADCXX_CH_AIN1;
+	st->tx_cmd_buf[2] = ADC122S101_CH_AIN1;
 	st->xfer[1].rx_buf = &st->data[2];
 	st->xfer[1].tx_buf = &st->tx_cmd_buf[2];
 	st->xfer[1].len = 2;
 
-	spi_message_init(&st->msg[ADCXX_CH1]);
-	spi_message_add_tail(&st->xfer[1], &st->msg[ADCXX_CH1]);
+	spi_message_init(&st->msg[1]);
+	spi_message_add_tail(&st->xfer[1], &st->msg[1]);
 
-	if (pdata && pdata->vref_mv)
+	if (pdata && pdata->vref_mv) {
 		st->int_vref_mv = pdata->vref_mv;
-	else if (voltage_uv)
+		printk("%s: pdata->vref_mv %d\n", __func__, pdata->vref_mv);
+	}
+	else if (voltage_uv) {
 		st->int_vref_mv = voltage_uv / 1000;
+		printk("%s: voltage_uv %d\n", __func__, voltage_uv);
+	}
 	else
 		dev_warn(&spi->dev, "reference voltage unspecified\n");
+
+	printk("%s: st->int_vref_mv %d\n", __func__, st->int_vref_mv);
 
 	indio_dev->channels = st->chip_info->channel;
 	indio_dev->num_channels = 3;
 
 #ifdef CONFIG_IIO_BUFFER
-	ret = adcxx_register_ring_funcs_and_init(indio_dev);
+	ret = adc122s101_register_ring_funcs_and_init(indio_dev);
 	if (ret)
 		goto error_disable_reg;
 
@@ -214,7 +231,7 @@ error_unregister_ring:
 	iio_buffer_unregister(indio_dev);
 error_cleanup_ring:
 	printk("%s: error_cleanup_ring\n", __func__);
-	adcxx_ring_cleanup(indio_dev);
+	adc122s101_ring_cleanup(indio_dev);
 #endif
 error_disable_reg:
 	printk("%s: error_disable_reg\n", __func__);
@@ -232,17 +249,17 @@ error_put_reg:
 	return ret;
 }
 
-static int adcxx_remove(struct spi_device *spi)
+static int adc122s101_remove(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 #if 0
-	struct adcxx_state *st = iio_priv(indio_dev);
+	struct adc122s101_state *st = iio_priv(indio_dev);
 #endif
 
 	iio_device_unregister(indio_dev);
 #ifdef CONFIG_IIO_BUFFER
 	iio_buffer_unregister(indio_dev);
-	adcxx_ring_cleanup(indio_dev);
+	adc122s101_ring_cleanup(indio_dev);
 #endif
 #if 0
 	if (!IS_ERR(st->reg)) {
@@ -255,33 +272,33 @@ static int adcxx_remove(struct spi_device *spi)
 	return 0;
 }
 
-static const struct spi_device_id adcxx_id[] = {
-	{"adcxx", ID_ADCXX},
+static const struct spi_device_id adc122s101_id[] = {
+	{"adc122s101", ID_ADC122S101},
 	{}
 };
 
-static struct spi_driver adcxx_driver = {
+static struct spi_driver adc122s101_driver = {
 	.driver = {
-		.name	= "adcxx",
+		.name	= "adc122s101",
 		.owner	= THIS_MODULE,
 	},
-	.probe		= adcxx_probe,
-	.remove		= __devexit_p(adcxx_remove),
-	.id_table	= adcxx_id,
+	.probe		= adc122s101_probe,
+	.remove		= __devexit_p(adc122s101_remove),
+	.id_table	= adc122s101_id,
 };
 
-static int __init adcxx_init(void)
+static int __init adc122s101_init(void)
 {
-	return spi_register_driver(&adcxx_driver);
+	return spi_register_driver(&adc122s101_driver);
 }
-module_init(adcxx_init);
+module_init(adc122s101_init);
 
-static void __exit adcxx_exit(void)
+static void __exit adc122s101_exit(void)
 {
-	spi_unregister_driver(&adcxx_driver);
+	spi_unregister_driver(&adc122s101_driver);
 }
-module_exit(adcxx_exit);
+module_exit(adc122s101_exit);
 
 MODULE_AUTHOR("Don Smyth <don@watchfrog.co>");
-MODULE_DESCRIPTION("Texas Instruments adcxx ADC");
+MODULE_DESCRIPTION("Texas Instruments adc122s101 ADC");
 MODULE_LICENSE("GPL v2");

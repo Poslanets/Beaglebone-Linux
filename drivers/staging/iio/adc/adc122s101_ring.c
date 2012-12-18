@@ -5,7 +5,7 @@
  *
  * Licensed under the GPL-2.
  *
- * adcxx_ring.c
+ * adc122s101_ring.c
  */
 
 #include <linux/interrupt.h>
@@ -19,9 +19,9 @@
 #include "../ring_sw.h"
 #include "../trigger_consumer.h"
 
-#include "adcxx.h"
+#include "adc122s101.h"
 
-int adcxx_scan_from_ring(struct adcxx_state *st, int channum)
+int adc122s101_scan_from_ring(struct adc122s101_state *st, int channum)
 {
 	struct iio_buffer *ring = iio_priv_to_dev(st)->buffer;
 	int count = 0, ret;
@@ -56,15 +56,15 @@ error_ret:
 }
 
 /**
- * adcxx_ring_preenable() setup the parameters of the ring before enabling
+ * adc122s101_ring_preenable() setup the parameters of the ring before enabling
  *
- * The complex nature of the setting of the nuber of bytes per datum is due
+ * The complex nature of the setting of the number of bytes per datum is due
  * to this driver currently ensuring that the timestamp is stored at an 8
  * byte boundary.
  **/
-static int adcxx_ring_preenable(struct iio_dev *indio_dev)
+static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 {
-	struct adcxx_state *st;
+	struct adc122s101_state *st;
 	struct iio_buffer *ring;
 
 	printk("%s\n", __func__);
@@ -112,42 +112,42 @@ static int adcxx_ring_preenable(struct iio_dev *indio_dev)
 	printk("%s : scan_mask 0x%08x\n", __func__, *ring->scan_mask);
 	switch (*ring->scan_mask) {
 	case (1 << 0):
-		st->ring_msg = &st->msg[ADCXX_CH0];
+		st->ring_msg = &st->msg[0];
 		break;
 	case (1 << 1):
-		st->ring_msg = &st->msg[ADCXX_CH1];
+		st->ring_msg = &st->msg[1];
 		/* Dummy read: push CH1 setting down to hardware */
 		spi_sync(st->spi, st->ring_msg);
 		break;
 	default:
 		printk("%s : error setting ring_msg: defaulting to ch0\n", __func__);
-		st->ring_msg = &st->msg[ADCXX_CH0];
+		st->ring_msg = &st->msg[0];
 		break;
 	}
 
 	return 0;
 }
 
-static int adcxx_ring_postdisable(struct iio_dev *indio_dev)
+static int adc122s101_ring_postdisable(struct iio_dev *indio_dev)
 {
-	struct adcxx_state *st = iio_priv(indio_dev);
+	struct adc122s101_state *st = iio_priv(indio_dev);
 
 	/* dummy read: restore default CH0 settin */
-	return spi_sync(st->spi, &st->msg[ADCXX_CH0]);
+	return spi_sync(st->spi, &st->msg[0]);
 }
 
 /**
- * adcxx_trigger_handler() bh of trigger launched polling to ring buffer
+ * adc122s101_trigger_handler() bh of trigger launched polling to ring buffer
  *
  * Currently there is no option in this driver to disable the saving of
  * timestamps within the ring.
  **/
 
-static irqreturn_t adcxx_trigger_handler(int irq, void *p)
+static irqreturn_t adc122s101_trigger_handler(int irq, void *p)
 {
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
-	struct adcxx_state *st = iio_priv(indio_dev);
+	struct adc122s101_state *st = iio_priv(indio_dev);
 	struct iio_buffer *ring = indio_dev->buffer;
 	s64 time_ns;
 	__u8 *buf;
@@ -158,6 +158,10 @@ static irqreturn_t adcxx_trigger_handler(int irq, void *p)
 
 	bytes = ring->scan_count *
 		st->chip_info->channel[0].scan_type.storagebits / 8;
+
+	printk("%s: scan_count %d storagebits %d bytes %d d_size\n", __func__, 
+		ring->scan_count, st->chip_info->channel[0].scan_type.storagebits,
+		bytes, st->d_size);
 
 	buf = kzalloc(st->d_size, GFP_KERNEL);
 	if (buf == NULL)
@@ -184,14 +188,14 @@ done:
 	return IRQ_HANDLED;
 }
 
-static const struct iio_buffer_setup_ops adcxx_ring_setup_ops = {
-	.preenable = &adcxx_ring_preenable,
+static const struct iio_buffer_setup_ops adc122s101_ring_setup_ops = {
+	.preenable = &adc122s101_ring_preenable,
 	.postenable = &iio_triggered_buffer_postenable,
 	.predisable = &iio_triggered_buffer_predisable,
-	.postdisable = &adcxx_ring_postdisable,
+	.postdisable = &adc122s101_ring_postdisable,
 };
 
-int adcxx_register_ring_funcs_and_init(struct iio_dev *indio_dev)
+int adc122s101_register_ring_funcs_and_init(struct iio_dev *indio_dev)
 {
 	int ret;
 
@@ -206,10 +210,10 @@ int adcxx_register_ring_funcs_and_init(struct iio_dev *indio_dev)
 	/* Effectively select the ring buffer implementation */
 	indio_dev->buffer->access = &ring_sw_access_funcs;
 	indio_dev->pollfunc = iio_alloc_pollfunc(&iio_pollfunc_store_time,
-						 &adcxx_trigger_handler,
+						 &adc122s101_trigger_handler,
 						 IRQF_ONESHOT,
 						 indio_dev,
-						 "adcxx_consumer%d",
+						 "adc122s101_consumer%d",
 						 indio_dev->id);
 	if (indio_dev->pollfunc == NULL) {
 		ret = -ENOMEM;
@@ -217,7 +221,7 @@ int adcxx_register_ring_funcs_and_init(struct iio_dev *indio_dev)
 	}
 
 	/* Ring buffer functions - here trigger setup related */
-	indio_dev->buffer->setup_ops = &adcxx_ring_setup_ops;
+	indio_dev->buffer->setup_ops = &adc122s101_ring_setup_ops;
 
 	/* Flag that polled ring buffering is possible */
 	indio_dev->modes |= INDIO_BUFFER_TRIGGERED;
@@ -229,7 +233,7 @@ error_ret:
 	return ret;
 }
 
-void adcxx_ring_cleanup(struct iio_dev *indio_dev)
+void adc122s101_ring_cleanup(struct iio_dev *indio_dev)
 {
 	printk("%s\n", __func__);
 

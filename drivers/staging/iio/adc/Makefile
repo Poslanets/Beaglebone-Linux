@@ -38,6 +38,6 @@ obj-$(CONFIG_ADT7310) += adt7310.o
 obj-$(CONFIG_ADT7410) += adt7410.o
 obj-$(CONFIG_AD7280) += ad7280a.o
 
-adcxx-y := adcxx_core.o
-adcxx-$(CONFIG_IIO_BUFFER) += adcxx_ring.o
-obj-$(CONFIG_ADC122S101) += adcxx.o
+adc122s101-y := adc122s101_core.o
+adc122s101-$(CONFIG_IIO_BUFFER) += adc122s101_ring.o
+obj-$(CONFIG_ADC122S101) += adc122s101.o

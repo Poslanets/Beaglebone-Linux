@@ -2465,7 +2465,7 @@ static struct spi_board_info am335x_spi1_slave_info[] = {
 	},
 };
 
-#if 0 /* Watchfrog: use adcxx on spi2 */
+#if 0 /* Watchfrog: use adc122s101 on spi2 */
 static struct spi_board_info bone_spidev2_info[] = {
 	{
 		.modalias      = "spidev",
@@ -2478,7 +2478,7 @@ static struct spi_board_info bone_spidev2_info[] = {
 #else
 static struct spi_board_info bone_spidev2_info[] = {
 	{
-		.modalias      = "adcxx",
+		.modalias      = "adc122s101",
 		.irq           = -1,
 		.max_speed_hz  = 12000000,
 		.bus_num       = 2,
