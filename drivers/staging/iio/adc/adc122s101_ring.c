@@ -27,20 +27,28 @@ int adc122s101_scan_from_ring(struct adc122s101_state *st, int channum)
 	int count = 0, ret;
 	u16 *ring_data;
 
+	printk("%s: channum 0x%04x, scan_mask 0x%08lx\n", __func__,
+			channum, *(ring->scan_mask));
 	if (!(test_bit(channum, ring->scan_mask))) {
+		printk("%s: channum not in scan_mask\n", __func__);
 		ret = -EBUSY;
 		goto error_ret;
 	}
 
-	ring_data = kmalloc(ring->access->get_bytes_per_datum(ring),
-			    GFP_KERNEL);
+	printk("%s: bytes_per_datum %d\n", __func__,
+			ring->access->get_bytes_per_datum(ring));
+	ring_data = kmalloc(ring->access->get_bytes_per_datum(ring), GFP_KERNEL);
 	if (ring_data == NULL) {
+		printk("%s: can't allocate ring_data\n", __func__);
 		ret = -ENOMEM;
 		goto error_ret;
 	}
+
 	ret = ring->access->read_last(ring, (u8 *) ring_data);
-	if (ret)
+	if (ret) {
+		printk("%s: can't read_last ring_data\n", __func__);
 		goto error_free_ring_data;
+	}
 
 	/* for single channel scan the result is stored with zero offset */
 	if ((test_bit(1, ring->scan_mask) || test_bit(0, ring->scan_mask)) &&
@@ -48,6 +56,9 @@ int adc122s101_scan_from_ring(struct adc122s101_state *st, int channum)
 		count = 1;
 
 	ret = be16_to_cpu(ring_data[count]);
+
+	printk("%s: count %d, ret %d\n", __func__,
+			count, ret);
 
 error_free_ring_data:
 	kfree(ring_data);
@@ -86,11 +97,14 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 		return -ENOMEM;
 	}
 	
-	printk("%s : scan_count %d\n", __func__, ring->scan_count);
+	printk("%s : scan_count %d, storagebits %d\n", __func__,
+			ring->scan_count,
+			st->chip_info->channel[0].scan_type.storagebits);
 	
 	st->d_size = ring->scan_count *
 		st->chip_info->channel[0].scan_type.storagebits / 8;
 
+	printk("%s : d_size %d\n", __func__, st->d_size);
 	printk("%s : scan_timestamp %d\n", __func__, ring->scan_timestamp);
 	
 	if (ring->scan_timestamp) {
@@ -98,30 +112,36 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 
 		if (st->d_size % sizeof(s64))
 			st->d_size += sizeof(s64) - (st->d_size % sizeof(s64));
+		printk("%s : d_size %d\n", __func__, st->d_size);
 	}
-	
-	printk("%s : d_size %d\n", __func__, st->d_size);
 
 	if (indio_dev->buffer->access->set_bytes_per_datum)
-		indio_dev->buffer->access->
-			set_bytes_per_datum(indio_dev->buffer, st->d_size);
+		indio_dev->buffer->access->set_bytes_per_datum(indio_dev->buffer, st->d_size);
 	else
 		printk("%s : error setting bytes_per_datum\n", __func__);
 	
 	/* We know this is a single long so can 'cheat' */
 	printk("%s : scan_mask 0x%08x\n", __func__, *ring->scan_mask);
 	switch (*ring->scan_mask) {
+	/* read channel 0 */
 	case (1 << 0):
+		printk("%s : scan channel 0\n", __func__);
 		st->ring_msg = &st->msg[0];
 		break;
+	/* read channel 1 */
 	case (1 << 1):
+		printk("%s : scan channel 1\n", __func__);
 		st->ring_msg = &st->msg[1];
 		/* Dummy read: push CH1 setting down to hardware */
 		spi_sync(st->spi, st->ring_msg);
 		break;
+	/* read both channels */
+	case ((1 << 1) | (1 << 0)):
+		printk("%s : scan both channels\n", __func__);
+		st->ring_msg = &st->msg[3];
+		break;
 	default:
-		printk("%s : error setting ring_msg: defaulting to ch0\n", __func__);
-		st->ring_msg = &st->msg[0];
+		printk("%s : bad scan mask\n", __func__);
 		break;
 	}
 
@@ -131,6 +151,8 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 static int adc122s101_ring_postdisable(struct iio_dev *indio_dev)
 {
 	struct adc122s101_state *st = iio_priv(indio_dev);
+
+	printk("%s\n", __func__);
 
 	/* dummy read: restore default CH0 settin */
 	return spi_sync(st->spi, &st->msg[0]);
@@ -153,35 +175,48 @@ static irqreturn_t adc122s101_trigger_handler(int irq, void *p)
 	__u8 *buf;
 	int b_sent;
 	unsigned int bytes;
+	int i;
 
 	printk("%s\n", __func__);
 
 	bytes = ring->scan_count *
 		st->chip_info->channel[0].scan_type.storagebits / 8;
 
-	printk("%s: scan_count %d storagebits %d bytes %d d_size\n", __func__, 
+	printk("%s: scan_count %d, storagebits %d, bytes %d, d_size %d\n", __func__,
 		ring->scan_count, st->chip_info->channel[0].scan_type.storagebits,
 		bytes, st->d_size);
 
 	buf = kzalloc(st->d_size, GFP_KERNEL);
-	if (buf == NULL)
+	if (buf == NULL) {
+		printk("%s error allocating buf\n", __func__);
 		return -ENOMEM;
+	}
 
 	printk("%s: spi %p, ring_msg %p\n", __func__, st->spi, st->ring_msg);
 
 	b_sent = spi_sync(st->spi, st->ring_msg);
-	if (b_sent)
+	if (b_sent)	{
+		printk("%s error from spi_sync: %d\n", __func__, b_sent);
 		goto done;
+	}
 
 	time_ns = iio_get_time_ns();
-
 	memcpy(buf, st->data, bytes);
-	if (ring->scan_timestamp)
+	if (ring->scan_timestamp) {
+		printk("%s: store timestamp\n", __func__);
 		memcpy(buf + st->d_size - sizeof(s64),
 		       &time_ns, sizeof(time_ns));
+	}
+
+	printk("%s: buf is ", __func__);
+	for (i=0; i<st->d_size; i++) {
+		printk(" 0x%hhx", buf[i]);
+	}
+	printk("\n");
 
 	indio_dev->buffer->access->store_to(indio_dev->buffer, buf, time_ns);
 done:
+	printk("%s: done\n", __func__);
 	kfree(buf);
 	iio_trigger_notify_done(indio_dev->trig);
 

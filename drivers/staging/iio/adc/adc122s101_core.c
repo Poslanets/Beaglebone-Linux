@@ -62,7 +62,7 @@ static int adc122s101_read_raw(struct iio_dev *indio_dev,
 		mutex_lock(&indio_dev->mlock);
 #ifdef CONFIG_IIO_BUFFER
 		if (iio_buffer_enabled(indio_dev))
-			ret = adc122s101_scan_from_ring(st, 1 << chan->address);
+			ret = adc122s101_scan_from_ring(st, chan->scan_index);
 		else
 			ret = adc122s101_scan_direct(st, chan->address);
 #else
@@ -187,6 +187,14 @@ static int __devinit adc122s101_probe(struct spi_device *spi)
 
 	spi_message_init(&st->msg[1]);
 	spi_message_add_tail(&st->xfer[1], &st->msg[1]);
+
+	/* setup message to read both channels */
+	st->xfer[2].rx_buf = &st->data[0];
+	st->xfer[2].tx_buf = &st->tx_cmd_buf[0];
+	st->xfer[2].len = 4;
+
+	spi_message_init(&st->msg[2]);
+	spi_message_add_tail(&st->xfer[2], &st->msg[2]);
 
 	if (pdata && pdata->vref_mv) {
 		st->int_vref_mv = pdata->vref_mv;

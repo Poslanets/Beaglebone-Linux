@@ -44,8 +44,9 @@ struct adc122s101_state {
 #endif
 	size_t				d_size;
 	u16				int_vref_mv;
-	struct spi_transfer		xfer[2];
-	struct spi_message		msg[2];
+	/* need three messages for chan0, chan1 and both */
+	struct spi_transfer		xfer[3];
+	struct spi_message		msg[3];
 	struct spi_message		*ring_msg;
 	unsigned char			tx_cmd_buf[8];
 
