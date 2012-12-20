@@ -13,10 +13,12 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
+#include <linux/sched.h>
 
 #include "../iio.h"
 #include "../buffer_generic.h"
 #include "../ring_sw.h"
+#include "../trigger.h"
 #include "../trigger_consumer.h"
 
 #include "adc122s101.h"
@@ -121,7 +123,7 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 		printk("%s : error setting bytes_per_datum\n", __func__);
 	
 	/* We know this is a single long so can 'cheat' */
-	printk("%s : scan_mask 0x%08x\n", __func__, *ring->scan_mask);
+	printk("%s : scan_mask 0x%08lx\n", __func__, *ring->scan_mask);
 	switch (*ring->scan_mask) {
 	/* read channel 0 */
 	case (1 << 0):
@@ -275,3 +277,97 @@ void adc122s101_ring_cleanup(struct iio_dev *indio_dev)
 	iio_dealloc_pollfunc(indio_dev->pollfunc);
 	iio_sw_rb_free(indio_dev->buffer);
 }
+
+/**
+ * adc122s101_data_rdy_trig_poll() the event handler for the data rdy trig
+ **/
+static irqreturn_t adc122s101_data_rdy_trig_poll(int irq, void *private)
+{
+	struct adc122s101_state *st = iio_priv(private);
+	printk("%s\n", __func__);
+
+	st->done = true;
+	wake_up_interruptible(&st->wq_data_avail);
+	disable_irq_nosync(irq);
+	st->irq_dis = true;
+	iio_trigger_poll(st->trig, iio_get_time_ns());
+
+	return IRQ_HANDLED;
+}
+
+int adc122s101_probe_trigger(struct iio_dev *indio_dev)
+{
+	struct adc122s101_state *st = iio_priv(indio_dev);
+	int ret;
+
+	printk("%s\n", __func__);
+
+#if 0
+	st->trig = iio_allocate_trigger("iio_prtc_trigger",
+					spi_get_device_id(st->spi)->name,
+					indio_dev->id);
+	if (st->trig == NULL) {
+		printk("%s: can't allocate trigger\n", __func__);
+		ret = -ENOMEM;
+		goto error_ret;
+	}
+
+#else
+	st->trig = iio_allocate_trigger("%s-dev%d",
+					spi_get_device_id(st->spi)->name,
+					indio_dev->id);
+	if (st->trig == NULL) {
+		printk("%s: can't allocate trigger\n", __func__);
+		ret = -ENOMEM;
+		goto error_ret;
+	}
+
+	ret = request_irq(st->spi->irq,
+			  adc122s101_data_rdy_trig_poll,
+			  IRQF_TRIGGER_LOW,
+			  spi_get_device_id(st->spi)->name,
+			  indio_dev);
+	if (ret) {
+		printk("%s: error %d can't request IRQ %d\n", __func__, ret, st->spi->irq);
+		goto error_free_trig;
+	}
+
+	disable_irq_nosync(st->spi->irq);
+	st->irq_dis = true;
+#endif
+
+	st->trig->dev.parent = &st->spi->dev;
+	st->trig->owner = THIS_MODULE;
+	st->trig->private_data = indio_dev;
+
+	ret = iio_trigger_register(st->trig);
+
+	/* select default trigger */
+	indio_dev->trig = st->trig;
+
+	if (ret) {
+		printk("%s: error %d can't register trigger\n", __func__, ret);
+		goto error_free_irq;
+	}
+
+	//st->trig->ops->set_trigger_state(st->trig, true);
+
+	return 0;
+
+error_free_irq:
+	free_irq(st->spi->irq, indio_dev);
+error_free_trig:
+	iio_free_trigger(st->trig);
+error_ret:
+	return ret;
+}
+
+void adc122s101_remove_trigger(struct iio_dev *indio_dev)
+{
+	struct adc122s101_state *st = iio_priv(indio_dev);
+
+	iio_trigger_unregister(st->trig);
+	free_irq(st->spi->irq, indio_dev);
+	iio_free_trigger(st->trig);
+}
+

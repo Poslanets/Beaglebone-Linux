@@ -214,35 +214,48 @@ static int __devinit adc122s101_probe(struct spi_device *spi)
 
 #ifdef CONFIG_IIO_BUFFER
 	ret = adc122s101_register_ring_funcs_and_init(indio_dev);
-	if (ret)
+	if (ret) {
+		printk("%s: error %d register ring\n", __func__, ret);
 		goto error_disable_reg;
+	}
+
+	ret = adc122s101_probe_trigger(indio_dev);
+	if (ret) {
+		printk("%s: error %d probe trigger\n", __func__, ret);
+		goto error_unreg_ring;
+	}
 
 	ret = iio_buffer_register(indio_dev,
 				  indio_dev->channels,
 				  indio_dev->num_channels);
-	if (ret)
-		goto error_cleanup_ring;
+	if (ret) {
+		printk("%s: error %d buffer register\n", __func__, ret);
+		goto error_remove_trigger;
+	}
 
 	ret = iio_device_register(indio_dev);
-	if (ret)
-		goto error_unregister_ring;
+	if (ret) {
+		printk("%s: error %d device register\n", __func__, ret);
+		goto error_uninitialize_ring;
+	}
 #else
 	ret = iio_device_register(indio_dev);
-	if (ret)
+	if (ret) {
+		printk("%s: error %d device register\n", __func__, ret);
 		goto error_disable_reg;
+	}
 #endif
 	printk("%s: Done\n", __func__);
 	return 0;
 #ifdef CONFIG_IIO_BUFFER
-error_unregister_ring:
-	printk("%s: error_unregister_ring\n", __func__);
+error_uninitialize_ring:
 	iio_buffer_unregister(indio_dev);
-error_cleanup_ring:
-	printk("%s: error_cleanup_ring\n", __func__);
+error_remove_trigger:
+	adc122s101_remove_trigger(indio_dev);
+error_unreg_ring:
 	adc122s101_ring_cleanup(indio_dev);
 #endif
 error_disable_reg:
-	printk("%s: error_disable_reg\n", __func__);
 #if 0
 	if (!IS_ERR(st->reg))
 		regulator_disable(st->reg);
@@ -267,6 +280,7 @@ static int adc122s101_remove(struct spi_device *spi)
 	iio_device_unregister(indio_dev);
 #ifdef CONFIG_IIO_BUFFER
 	iio_buffer_unregister(indio_dev);
+	adc122s101_remove_trigger(indio_dev);
 	adc122s101_ring_cleanup(indio_dev);
 #endif
 #if 0
