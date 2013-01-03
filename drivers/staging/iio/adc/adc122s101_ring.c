@@ -79,14 +79,15 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 {
 	struct adc122s101_state *st;
 	struct iio_buffer *ring;
+	int ret;
 
 	printk("%s\n", __func__);
-	
+
 	if (indio_dev == NULL)	{
 		printk("%s : error NULL iio_dev\n", __func__);
 		return -ENOMEM;
 	}
-	
+
 	st = iio_priv(indio_dev);
 	if (st == NULL)	{
 		printk("%s : error NULL st\n", __func__);
@@ -98,17 +99,17 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 		printk("%s : error NULL ring\n", __func__);
 		return -ENOMEM;
 	}
-	
+
 	printk("%s : scan_count %d, storagebits %d\n", __func__,
 			ring->scan_count,
 			st->chip_info->channel[0].scan_type.storagebits);
-	
+
 	st->d_size = ring->scan_count *
 		st->chip_info->channel[0].scan_type.storagebits / 8;
 
 	printk("%s : d_size %d\n", __func__, st->d_size);
 	printk("%s : scan_timestamp %d\n", __func__, ring->scan_timestamp);
-	
+
 	if (ring->scan_timestamp) {
 		st->d_size += sizeof(s64);
 
@@ -121,7 +122,7 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 		indio_dev->buffer->access->set_bytes_per_datum(indio_dev->buffer, st->d_size);
 	else
 		printk("%s : error setting bytes_per_datum\n", __func__);
-	
+
 	/* We know this is a single long so can 'cheat' */
 	printk("%s : scan_mask 0x%08lx\n", __func__, *ring->scan_mask);
 	switch (*ring->scan_mask) {
@@ -147,17 +148,31 @@ static int adc122s101_ring_preenable(struct iio_dev *indio_dev)
 		break;
 	}
 
+	if (st->trig == NULL) {
+		printk("%s: trig NULL\n", __func__);
+	} else if (st->trig->ops == NULL) {
+		printk("%s: ops NULL\n", __func__);
+	} else if (st->trig->ops->set_trigger_state == NULL) {
+		printk("%s: set_trigger_state NULL\n", __func__);
+	} else {
+		ret = st->trig->ops->set_trigger_state(st->trig, true);
+		printk("%s: set_trigger_state returned %d\n", __func__, ret);
+	}
 	return 0;
 }
 
 static int adc122s101_ring_postdisable(struct iio_dev *indio_dev)
 {
 	struct adc122s101_state *st = iio_priv(indio_dev);
+	int ret;
 
 	printk("%s\n", __func__);
 
-	/* dummy read: restore default CH0 settin */
-	return spi_sync(st->spi, &st->msg[0]);
+	/* dummy read: restore default CH0 setting */
+	ret = spi_sync(st->spi, &st->msg[0]);
+
+	st->trig->ops->set_trigger_state(st->trig, false);
+	return ret;
 }
 
 /**
@@ -246,22 +261,26 @@ int adc122s101_register_ring_funcs_and_init(struct iio_dev *indio_dev)
 	}
 	/* Effectively select the ring buffer implementation */
 	indio_dev->buffer->access = &ring_sw_access_funcs;
-	indio_dev->pollfunc = iio_alloc_pollfunc(&iio_pollfunc_store_time,
+	indio_dev->pollfunc = iio_alloc_pollfunc(NULL, //&iio_pollfunc_store_time,
 						 &adc122s101_trigger_handler,
 						 IRQF_ONESHOT,
 						 indio_dev,
-						 "adc122s101_consumer%d",
+						 "%s_consumer%d",
+						 indio_dev->name,
 						 indio_dev->id);
+
 	if (indio_dev->pollfunc == NULL) {
 		ret = -ENOMEM;
 		goto error_deallocate_sw_rb;
 	}
 
 	/* Ring buffer functions - here trigger setup related */
+	indio_dev->buffer->access = &ring_sw_access_funcs;
 	indio_dev->buffer->setup_ops = &adc122s101_ring_setup_ops;
 
 	/* Flag that polled ring buffering is possible */
 	indio_dev->modes |= INDIO_BUFFER_TRIGGERED;
+	//indio_dev->modes |= INDIO_BUFFER_HARDWARE;
 	return 0;
 
 error_deallocate_sw_rb:
@@ -298,14 +317,11 @@ static irqreturn_t adc122s101_data_rdy_trig_poll(int irq, void *private)
 int adc122s101_probe_trigger(struct iio_dev *indio_dev)
 {
 	struct adc122s101_state *st = iio_priv(indio_dev);
-	int ret;
+	int ret=0;
 
 	printk("%s\n", __func__);
-
-#if 0
-	st->trig = iio_allocate_trigger("iio_prtc_trigger",
-					spi_get_device_id(st->spi)->name,
-					indio_dev->id);
+#if 1
+	st->trig = iio_allocate_trigger("hrtimer0");
 	if (st->trig == NULL) {
 		printk("%s: can't allocate trigger\n", __func__);
 		ret = -ENOMEM;
@@ -349,8 +365,6 @@ int adc122s101_probe_trigger(struct iio_dev *indio_dev)
 		printk("%s: error %d can't register trigger\n", __func__, ret);
 		goto error_free_irq;
 	}
-
-	//st->trig->ops->set_trigger_state(st->trig, true);
 
 	return 0;
 

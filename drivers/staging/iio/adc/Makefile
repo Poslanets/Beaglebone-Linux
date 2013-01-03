@@ -41,3 +41,4 @@ obj-$(CONFIG_AD7280) += ad7280a.o
 adc122s101-y := adc122s101_core.o
 adc122s101-$(CONFIG_IIO_BUFFER) += adc122s101_ring.o
 obj-$(CONFIG_ADC122S101) += adc122s101.o
+obj-$(CONFIG_TI_ADC) += ti_adc.o
