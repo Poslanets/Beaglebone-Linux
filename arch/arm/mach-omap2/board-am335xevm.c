@@ -3452,9 +3452,12 @@ out2:
 		}
 		if(beaglebone_spi1_free == 1) {
 			beaglebone_spi1_free = 0;
-			pr_info("BeagleBone cape: exporting SPI pins as spidev\n");
+			pr_info("BeagleBone cape: exporting SPI pins\n");
 			setup_pin_mux(spi1_pin_mux);
+#ifdef CONFIG_SPI_SPIDEV
+			pr_info("BeagleBone cape: registering spidev board device\n");
 			spi_register_board_info(bone_spidev2_info, ARRAY_SIZE(bone_spidev2_info));
+#endif
 		}
 		if(beaglebone_w1gpio_free == 1) {
 			pr_info("BeagleBone cape: initializing w1-gpio\n");
